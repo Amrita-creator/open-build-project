@@ -9,7 +9,7 @@ from fastmcp import Context, FastMCP
 
 from inspo_mcp.repositories.runs import RunRepository
 from inspo_mcp.repositories.sources import SourceRepository
-from inspo_mcp.schemas import Framework, InspirationKit, InspirationRequest
+from inspo_mcp.schemas import Framework, InspirationKit, InspirationRequest, ScreenshotFallback
 from inspo_mcp.services.capture import CaptureService
 from inspo_mcp.services.run_manager import RunManager
 from inspo_mcp.services.url_safety import validate_public_urls
