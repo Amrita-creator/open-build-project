@@ -1,0 +1,28 @@
+# Virtual environments and secrets
+.venv/
+.venv-test/
+.env
+
+# Local application data
+data/
+captures/
+
+# Python cache and build artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
