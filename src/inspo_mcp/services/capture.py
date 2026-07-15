@@ -85,7 +85,7 @@ class CaptureSettings:
     max_user_screenshot_bytes: int = 10_000_000
     screenshot_timeout_milliseconds: int = 30_000
     screenshot_settle_milliseconds: int = 500
-    user_agent: str = "InspoMCP/0.1 (+safe source capture)"
+    user_agent: str = "InspoMCP/0.1 (+safe source capture; mailto:mcpfast2@gmail.com)"
 
 
 @dataclass(frozen=True)
