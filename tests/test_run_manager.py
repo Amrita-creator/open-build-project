@@ -24,9 +24,14 @@ class RunManagerTests(unittest.IsolatedAsyncioTestCase):
         self._temporary_directory.cleanup()
 
     def test_mock_run_is_persisted_as_completed(self) -> None:
+        from inspo_mcp.schemas import ScreenshotFallback
         request = InspirationRequest(
             inspiration_urls=["https://example.com", "https://example.org"],
             project_goal="Build a developer tool landing page.",
+            fallback_screenshots=[
+                ScreenshotFallback(source_url="https://example.com", image_path="/path/1.png"),
+                ScreenshotFallback(source_url="https://example.org", image_path="/path/2.png"),
+            ]
         )
 
         kit = self.manager.create_mock_kit(request)
@@ -39,9 +44,14 @@ class RunManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.inspiration_urls, tuple(str(url) for url in request.inspiration_urls))
 
     async def test_capture_stage_persists_run_and_exposes_source_failures(self) -> None:
+        from inspo_mcp.schemas import ScreenshotFallback
         request = InspirationRequest(
             inspiration_urls=["https://example.com", "https://example.org"],
             project_goal="Build a developer tool landing page.",
+            fallback_screenshots=[
+                ScreenshotFallback(source_url="https://example.com", image_path="/path/1.png"),
+                ScreenshotFallback(source_url="https://example.org", image_path="/path/2.png"),
+            ]
         )
         safe_urls = (
             SafeUrl(
@@ -79,6 +89,10 @@ class RunManagerTests(unittest.IsolatedAsyncioTestCase):
                 ScreenshotFallback(
                     source_url="https://example.com",
                     image_path="/path/to/screenshot.png",
+                ),
+                ScreenshotFallback(
+                    source_url="https://example.org",
+                    image_path="/path/to/screenshot2.png",
                 )
             ]
         )
@@ -104,7 +118,10 @@ class RunManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             capture_service.fallback_screenshots,
-            {"https://example.com/": "/path/to/screenshot.png"}
+            {
+                "https://example.com/": "/path/to/screenshot.png",
+                "https://example.org/": "/path/to/screenshot2.png",
+            }
         )
 
 

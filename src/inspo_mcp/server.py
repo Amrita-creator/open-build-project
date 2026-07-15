@@ -58,9 +58,9 @@ capture_service = CaptureService(
 async def create_inspiration_kit(
     inspiration_urls: list[str],
     project_goal: str,
+    fallback_screenshots: list[ScreenshotFallback],
     ctx: Context,
     framework: Framework = "nextjs-tailwind",
-    fallback_screenshots: list[ScreenshotFallback] | None = None,
 ) -> InspirationKit:
     """Return a five-part reusable design kit from two or three inspiration URLs."""
 
@@ -68,7 +68,7 @@ async def create_inspiration_kit(
         inspiration_urls=inspiration_urls,
         project_goal=project_goal,
         framework=framework,
-        fallback_screenshots=fallback_screenshots or [],
+        fallback_screenshots=fallback_screenshots,
     )
     safe_urls = validate_public_urls(request.inspiration_urls)
 
