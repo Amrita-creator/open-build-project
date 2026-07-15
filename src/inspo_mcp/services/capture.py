@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import socket
+import time
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -13,7 +15,6 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 from pydantic import HttpUrl, ValidationError
-
 from inspo_mcp.models.source import SourceRecord, SourceStatus, utc_now
 from inspo_mcp.repositories.sources import SourceRepository
 from inspo_mcp.services.url_safety import SafeUrl, UrlSafetyError, validate_public_urls
@@ -83,9 +84,10 @@ class CaptureSettings:
     max_response_bytes: int = 2_000_000
     max_visible_text_chars: int = 100_000
     max_user_screenshot_bytes: int = 10_000_000
+    min_host_request_interval_seconds: float = 1.0
     screenshot_timeout_milliseconds: int = 30_000
     screenshot_settle_milliseconds: int = 500
-    user_agent: str = "InspoMCP/0.1 (+safe source capture; mailto:mcpfast2@gmail.com)"
+    user_agent: str = "InspoMCP/0.1 (contact: configure INSPO_MCP_CONTACT_EMAIL)"
 
 
 @dataclass(frozen=True)
@@ -267,6 +269,8 @@ class CaptureService:
             self._settings,
             resolver=resolver,
         )
+        self._host_request_times: dict[str, float] = {}
+        self._host_pacing_lock = asyncio.Lock()
 
     async def capture_sources(
         self,
@@ -324,7 +328,17 @@ class CaptureService:
             final_url = final_source.url
             http_status = response.status_code
             if not 200 <= response.status_code < 300:
-                raise CaptureError(f"Capture returned HTTP {response.status_code}.")
+                retry_after = _header_value(response.headers, "retry-after")
+                retry_message = (
+                    f" The server requested Retry-After: {retry_after}; no retry was attempted."
+                    if retry_after
+                    else ""
+                )
+                raise CaptureError(
+                    f"Capture returned HTTP {response.status_code}.{retry_message}",
+                    http_status=response.status_code,
+                    final_url=final_url,
+                )
 
             page = sanitize_page(
                 response.body,
@@ -446,6 +460,7 @@ class CaptureService:
         current = source
         redirects_seen = 0
         while True:
+            await self._wait_for_host_slot(current.url)
             response = await self._fetcher.get(current.url)
             if response.status_code not in _REDIRECT_STATUSES:
                 return response, current
@@ -481,6 +496,21 @@ class CaptureService:
             return validate_public_urls([HttpUrl(target)], resolver=self._resolver)[0]
         except (UrlSafetyError, ValidationError, ValueError) as error:
             raise CaptureError(f"Unsafe redirect target blocked: {target}") from error
+
+    async def _wait_for_host_slot(self, url: str) -> None:
+        """Space requests to one host without adding retries or parallel pressure."""
+
+        interval = self._settings.min_host_request_interval_seconds
+        if interval <= 0:
+            return
+        host = urlsplit(url).netloc.lower()
+        async with self._host_pacing_lock:
+            now = time.monotonic()
+            next_allowed = self._host_request_times.get(host, now)
+            delay = max(0.0, next_allowed - now)
+            self._host_request_times[host] = max(now, next_allowed) + interval
+        if delay:
+            await asyncio.sleep(delay)
 
 
 def sanitize_page(

@@ -32,8 +32,24 @@ and every browser-routed HTTP request are revalidated. Artifacts are stored at
 `data/captures/<run-id>/` by default and successful captures are reused when the
 same run is retried. Set `INSPO_MCP_CAPTURE_ROOT` to use another location.
 
-The next phase extracts page structure from this captured evidence, then adds
-multimodal analysis.
+When a site blocks automatic capture, callers can provide up to three local
+PNG, JPEG, or WebP screenshots as URL-mapped fallbacks. The image is copied into
+the managed evidence store only after automatic capture fails; the response then
+contains a warning explaining that user-provided evidence was used.
+
+Automatic requests use a transparent, configurable `User-Agent` and are paced at
+one request per host per second by default. Set `INSPO_MCP_CONTACT_EMAIL` to a
+real project contact; do not imitate a browser or retry a `403`/`429` response.
+If a server sends `Retry-After`, the capture records that instruction and stops.
+
+M4 turns sanitized page text into persisted per-site structure evidence: inferred
+sections, calls to action, candidate cards, and a heading hierarchy. This stage
+is intentionally conservative; screenshot-only fallback sources are marked
+`awaiting_vision` rather than producing invented structure. Results are stored in
+SQLite for the next phase.
+
+The next phase adds multimodal, per-site analysis using this M4 evidence and
+screenshots where available.
 
 ## Run locally
 
@@ -80,6 +96,12 @@ output while it is running; MCP messages use that channel.
     "https://example.org"
   ],
   "project_goal": "Build a landing page for an AI developer tool.",
-  "framework": "nextjs-tailwind"
+  "framework": "nextjs-tailwind",
+  "fallback_screenshots": [
+    {
+      "source_url": "https://www.wikipedia.org/",
+      "image_path": "C:\\Users\\Amrita\\Pictures\\wikipedia.png"
+    }
+  ]
 }
 ```

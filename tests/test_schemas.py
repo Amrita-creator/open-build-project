@@ -41,16 +41,20 @@ class InspirationSchemaTests(unittest.TestCase):
         self.assertTrue(kit.design_tokens.colors)
         self.assertTrue(kit.build_tasks)
 
-    def test_request_fails_if_any_screenshot_is_missing(self) -> None:
+    def test_request_allows_a_fallback_for_only_one_source(self) -> None:
         from inspo_mcp.schemas import ScreenshotFallback
-        with self.assertRaises(ValidationError):
-            InspirationRequest(
-                inspiration_urls=["https://example.com", "https://example.org"],
-                project_goal="Build a developer tool landing page.",
-                fallback_screenshots=[
-                    ScreenshotFallback(source_url="https://example.com", image_path="/path/1.png")
-                ]
-            )
+        request = InspirationRequest(
+            inspiration_urls=["https://example.com", "https://example.org"],
+            project_goal="Build a developer tool landing page.",
+            fallback_screenshots=[
+                ScreenshotFallback(source_url="https://example.com", image_path="/path/1.png")
+            ]
+        )
+
+        self.assertEqual(
+            request.fallback_screenshot_map,
+            {"https://example.com/": "/path/1.png"},
+        )
 
 
 if __name__ == "__main__":

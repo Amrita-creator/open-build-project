@@ -121,17 +121,45 @@ class RunManagerTests(unittest.IsolatedAsyncioTestCase):
             {
                 "https://example.com/": "/path/to/screenshot.png",
                 "https://example.org/": "/path/to/screenshot2.png",
-            }
+            },
         )
+
+    async def test_capture_stage_warns_when_user_screenshot_is_used(self) -> None:
+        request = InspirationRequest(
+            inspiration_urls=["https://example.com", "https://example.org"],
+            project_goal="Build a developer tool landing page.",
+        )
+        safe_urls = (
+            SafeUrl(
+                url="https://example.com/",
+                host="example.com",
+                resolved_ips=("93.184.216.34",),
+            ),
+            SafeUrl(
+                url="https://example.org/",
+                host="example.org",
+                resolved_ips=("93.184.216.34",),
+            ),
+        )
+
+        kit = await self.manager.create_captured_mock_kit(
+            request,
+            safe_urls,
+            _CaptureSpy(use_user_screenshot=True),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(len(kit.warnings), 1)
+        self.assertIn("user-provided screenshot", kit.warnings[0].message.lower())
 
 
 class _CaptureSpy:
     """Small in-memory capture boundary used to verify the run orchestration."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, use_user_screenshot: bool = False) -> None:
         self.run_id: str | None = None
         self.safe_urls: tuple[SafeUrl, ...] | None = None
         self.fallback_screenshots: dict[str, str] | None = None
+        self.use_user_screenshot = use_user_screenshot
 
     async def capture_sources(
         self,
@@ -158,20 +186,43 @@ class _CaptureSpy:
                 redirect_chain=(safe_urls[0].url,),
                 captured_at=now,
             ),
-            SourceRecord(
+            self._second_source(run_id, safe_urls[1], now),
+        )
+
+    def _second_source(
+        self,
+        run_id: str,
+        source: SafeUrl,
+        captured_at: str,
+    ) -> SourceRecord:
+        if self.use_user_screenshot:
+            return SourceRecord(
                 run_id=run_id,
-                source_url=safe_urls[1].url,
-                final_url=None,
-                status=SourceStatus.FAILED,
-                http_status=502,
+                source_url=source.url,
+                final_url=source.url,
+                status=SourceStatus.USER_PROVIDED,
+                http_status=403,
                 title=None,
                 visible_text_path=None,
-                screenshot_path=None,
-                content_hash=None,
-                redirect_chain=(safe_urls[1].url,),
-                captured_at=now,
-                error_message="Capture returned HTTP 502.",
-            ),
+                screenshot_path="user-supplied.png",
+                content_hash="b" * 64,
+                redirect_chain=(source.url,),
+                captured_at=captured_at,
+                capture_note="Automatic capture was unavailable; user-provided screenshot used.",
+            )
+        return SourceRecord(
+            run_id=run_id,
+            source_url=source.url,
+            final_url=None,
+            status=SourceStatus.FAILED,
+            http_status=502,
+            title=None,
+            visible_text_path=None,
+            screenshot_path=None,
+            content_hash=None,
+            redirect_chain=(source.url,),
+            captured_at=captured_at,
+            error_message="Capture returned HTTP 502.",
         )
 
 

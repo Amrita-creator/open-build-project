@@ -16,6 +16,7 @@ class RunStatus(str, Enum):
     RECEIVED = "received"
     VALIDATING = "validating"
     CAPTURING = "capturing"
+    EXTRACTING = "extracting"
     GENERATING = "generating"
     COMPLETED = "completed"
     FAILED = "failed"

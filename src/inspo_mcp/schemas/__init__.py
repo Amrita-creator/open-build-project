@@ -40,6 +40,7 @@ class InspirationRequest(BaseModel):
         description="Target stack for the optional implementation guidance.",
     )
     fallback_screenshots: list[ScreenshotFallback] = Field(
+        default_factory=list,
         max_length=3,
         description=(
             "User-supplied screenshot fallbacks, one per inspiration URL. "
@@ -58,10 +59,6 @@ class InspirationRequest(BaseModel):
             )
         if len(set(fallback_urls)) != len(fallback_urls):
             raise ValueError("Only one fallback screenshot is allowed per inspiration URL.")
-        if len(source_urls) != len(fallback_urls):
-            raise ValueError(
-                "A fallback screenshot must be provided for every inspiration URL in this request."
-            )
         return self
 
     @property

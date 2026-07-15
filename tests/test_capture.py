@@ -151,7 +151,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
                 initial.url: FetchedResponse(
                     url=initial.url,
                     status_code=500,
-                    headers={},
+                    headers={"Retry-After": "120"},
                     body=b"Internal server error",
                 )
             }
@@ -181,6 +181,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.redirect_chain, (initial.url,))
         self.assertTrue(Path(record.screenshot_path or "").is_file())
         self.assertIn("Automatic capture was unavailable", record.capture_note or "")
+        self.assertIn("Retry-After: 120", record.capture_note or "")
         self.assertEqual(self.repository.list_for_run("run_fallback_test"), records)
 
 
