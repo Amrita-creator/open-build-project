@@ -1,6 +1,5 @@
 # Virtual environments and secrets
-.venv/
-.venv-test/
+.venv*/
 .env
 
 # Local application data
