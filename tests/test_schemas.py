@@ -56,6 +56,38 @@ class InspirationSchemaTests(unittest.TestCase):
             {"https://example.com/": "/path/1.png"},
         )
 
+    def test_request_accepts_screenshot_only_sources(self) -> None:
+        from inspo_mcp.schemas import InspirationScreenshot
+
+        request = InspirationRequest(
+            project_goal="Build a developer tool landing page.",
+            inspiration_screenshots=[
+                InspirationScreenshot(image_path="C:/screenshots/one.png", label="Linear"),
+                InspirationScreenshot(image_path="C:/screenshots/two.png", label="Notion"),
+            ],
+        )
+
+        self.assertEqual(request.inspiration_urls, [])
+        self.assertEqual(len(request.source_identifiers), 2)
+        self.assertTrue(all(identifier.startswith("user-screenshot://") for identifier in request.source_identifiers))
+
+    def test_primary_screenshot_for_url_counts_as_one_source(self) -> None:
+        from inspo_mcp.schemas import InspirationScreenshot
+
+        request = InspirationRequest(
+            inspiration_urls=["https://example.com", "https://example.org"],
+            inspiration_screenshots=[
+                InspirationScreenshot(
+                    source_url="https://example.com",
+                    image_path="C:/screenshots/example.png",
+                )
+            ],
+            project_goal="Build a developer tool landing page.",
+        )
+
+        self.assertEqual(len(request.source_identifiers), 2)
+        self.assertEqual(request.primary_screenshot_url_keys, frozenset({"https://example.com/"}))
+
 
 if __name__ == "__main__":
     unittest.main()

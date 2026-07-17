@@ -1,0 +1,27 @@
+services:
+  inspo-mcp:
+    build: .
+    env_file: .env
+    environment:
+      INSPO_MCP_ENVIRONMENT: production
+      INSPO_MCP_DATABASE_PATH: /var/lib/inspo-mcp/inspo_mcp.db
+      INSPO_MCP_CAPTURE_ROOT: /var/lib/inspo-mcp/captures
+      INSPO_MCP_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://jaeger:4318/v1/traces
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      - inspo_mcp_data:/var/lib/inspo-mcp
+    restart: unless-stopped
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.19.0
+    ports:
+      - "16686:16686"
+    restart: unless-stopped
+
+volumes:
+  inspo_mcp_data:

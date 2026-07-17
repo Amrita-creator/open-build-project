@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from pathlib import Path
+
+from inspo_mcp.models.source import SemanticBlock
 
 
 class LocalCaptureStore:
@@ -19,6 +22,26 @@ class LocalCaptureStore:
         path = self._artifact_path(run_id, source_url, suffix=".txt")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
+        return path
+
+    def save_semantic_document(
+        self,
+        run_id: str,
+        source_url: str,
+        blocks: tuple[SemanticBlock, ...],
+    ) -> Path:
+        """Write semantic, text-only HTML evidence next to the visible-text file."""
+
+        path = self._artifact_path(run_id, source_url, suffix=".semantic.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {"version": 1, "blocks": [block.to_dict() for block in blocks]},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
         return path
 
     def screenshot_path(self, run_id: str, source_url: str) -> Path:
@@ -59,18 +82,31 @@ class LocalCaptureStore:
         shutil.copyfile(source, destination)
         return destination
 
+    def delete_run(self, run_id: str) -> None:
+        """Delete one managed evidence directory without following user input outside root."""
+
+        root = self.root.resolve()
+        target = (self.root / run_id).resolve()
+        if target.parent != root:
+            raise ValueError("Refusing to delete a capture path outside the managed root.")
+        if target.exists():
+            shutil.rmtree(target)
+
     @staticmethod
     def has_complete_evidence(
         visible_text_path: str | None,
         screenshot_path: str | None,
+        semantic_document_path: str | None,
     ) -> bool:
-        """Return whether both artifacts for a previously captured source remain."""
+        """Return whether all M3/M4 artifacts for a captured source remain."""
 
         return bool(
             visible_text_path
             and screenshot_path
+            and semantic_document_path
             and Path(visible_text_path).is_file()
             and Path(screenshot_path).is_file()
+            and Path(semantic_document_path).is_file()
         )
 
     @staticmethod

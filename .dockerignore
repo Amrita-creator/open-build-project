@@ -1,0 +1,10 @@
+.git
+.venv
+.venv-m4
+test-scr
+data
+__pycache__
+*.pyc
+.env
+.env.*
+!/.env.production.example

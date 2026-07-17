@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from inspo_mcp.models.source import SourceRecord, SourceStatus, utc_now
+from inspo_mcp.models.source import SemanticBlock, SourceRecord, SourceStatus, utc_now
 from inspo_mcp.repositories.site_analyses import SiteAnalysisRepository
 from inspo_mcp.services.extract import StructureExtractor
 from inspo_mcp.storage.database import SqliteDatabase
@@ -77,6 +78,56 @@ class StructureExtractorTests(unittest.TestCase):
         self.assertIn("M5 vision", analysis.extraction_message or "")
         self.assertEqual(self.repository.list_for_run("run_screenshot_only"), (analysis,))
 
+    def test_uses_semantic_boundaries_to_exclude_chrome_and_deduplicate_cards(self) -> None:
+        semantic_path = self.root / "semantic.json"
+        blocks = (
+            SemanticBlock("nav", "nav", "News\nGet started", ("header", "nav")),
+            SemanticBlock("heading", "h1", "FlowBoard", ("main", "section", "h1"), 1),
+            SemanticBlock(
+                "paragraph",
+                "p",
+                "Plan and ship product work from one workspace.",
+                ("main", "section", "p"),
+            ),
+            SemanticBlock("heading", "h2", "Features", ("main", "section", "h2"), 2),
+            SemanticBlock(
+                "card",
+                "card",
+                "Realtime dashboards\nMonitor product metrics as they change.",
+                ("main", "section", "card"),
+            ),
+            SemanticBlock(
+                "card",
+                "card",
+                "News\nA generic content category, not a reusable component.",
+                ("main", "section", "card"),
+            ),
+            SemanticBlock(
+                "card",
+                "card",
+                "News\nRepeated generic labels must not become two cards.",
+                ("main", "section", "card"),
+            ),
+            SemanticBlock("footer", "footer", "Sign up", ("footer",)),
+        )
+        semantic_path.write_text(
+            json.dumps({"version": 1, "blocks": [block.to_dict() for block in blocks]}),
+            encoding="utf-8",
+        )
+        source = _source(
+            run_id="run_semantics",
+            title="FlowBoard",
+            semantic_document_path=str(semantic_path),
+        )
+
+        analysis = self.extractor.extract(source)
+
+        self.assertEqual(analysis.status, "extracted")
+        self.assertEqual([section.name for section in analysis.sections], ["FlowBoard", "Features"])
+        self.assertEqual([card.title for card in analysis.cards], ["Realtime dashboards"])
+        self.assertEqual(analysis.cards[0].section, "Features")
+        self.assertEqual(analysis.calls_to_action, [])
+
 
 def _source(
     *,
@@ -85,6 +136,7 @@ def _source(
     visible_text_path: str | None = None,
     screenshot_path: str | None = None,
     title: str | None = None,
+    semantic_document_path: str | None = None,
 ) -> SourceRecord:
     return SourceRecord(
         run_id=run_id,
@@ -94,6 +146,7 @@ def _source(
         http_status=200,
         title=title,
         visible_text_path=visible_text_path,
+        semantic_document_path=semantic_document_path,
         screenshot_path=screenshot_path,
         content_hash="a" * 64,
         redirect_chain=("https://example.com/",),

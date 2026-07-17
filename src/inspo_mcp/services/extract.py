@@ -1,12 +1,13 @@
-"""Deterministic M4 extraction from captured, sanitized page text."""
+"""Deterministic M4 extraction from captured text and semantic HTML evidence."""
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Sequence
 
-from inspo_mcp.models.source import SourceRecord, SourceStatus, utc_now
+from inspo_mcp.models.source import SemanticBlock, SourceRecord, SourceStatus, utc_now
 from inspo_mcp.repositories.site_analyses import SiteAnalysisRepository
 from inspo_mcp.schemas.site_analysis import (
     CallToActionEvidence,
@@ -28,7 +29,22 @@ _SECTION_PATTERN = re.compile(
     r"testimonials?|customers?|security|resources?|faq|about|contact|footer)$",
     re.IGNORECASE,
 )
-_BULLET_PATTERN = re.compile(r"^[•*\-–]\s*(.+)$")
+_BULLET_PATTERN = re.compile(r"^[\u2022*\-\u2013]\s*(.+)$")
+_EXCLUDED_REGIONS = frozenset({"nav", "footer"})
+_GENERIC_CARD_LABELS = frozenset(
+    {
+        "news",
+        "latest",
+        "featured",
+        "feature",
+        "video",
+        "videos",
+        "more",
+        "explore",
+        "read more",
+        "view more",
+    }
+)
 
 
 class StructureExtractor:
@@ -50,6 +66,13 @@ class StructureExtractor:
 
         if source.status is SourceStatus.FAILED:
             return self._unavailable(source, "Source capture failed; no page evidence is available.")
+
+        semantic_blocks = _load_semantic_blocks(source.semantic_document_path)
+        if semantic_blocks:
+            semantic_analysis = _extract_semantic_structure(source, semantic_blocks)
+            if semantic_analysis is not None:
+                return semantic_analysis
+
         if not source.visible_text_path:
             if source.screenshot_path:
                 return self._awaiting_vision(
@@ -88,7 +111,83 @@ class StructureExtractor:
         return self._base(source, status="unavailable", message=message)
 
 
-def _extract_text_structure(source: SourceRecord, lines: list[str]) -> SiteStructureAnalysis:
+def _load_semantic_blocks(path: str | None) -> tuple[SemanticBlock, ...]:
+    """Read valid semantic sidecar blocks; older captures safely fall back to text."""
+
+    if not path:
+        return ()
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw_blocks = payload.get("blocks") if isinstance(payload, dict) else None
+        if not isinstance(raw_blocks, list):
+            return ()
+        return tuple(SemanticBlock.from_dict(block) for block in raw_blocks)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ()
+
+
+def _extract_semantic_structure(
+    source: SourceRecord,
+    blocks: Sequence[SemanticBlock],
+) -> SiteStructureAnalysis | None:
+    """Extract from DOM boundaries, omitting chrome before text heuristics run."""
+
+    lines: list[str] = []
+    explicit_heading_indices: set[int] = set()
+    card_anchor_lines: dict[int, int] = {}
+    for block_index, block in enumerate(blocks):
+        if not _is_page_content_block(block):
+            continue
+        if block.kind == "card":
+            card_anchor_lines[block_index] = max(1, len(lines))
+            continue
+        if block.kind not in {"heading", "paragraph", "list_item"}:
+            continue
+        for line in _normalized_lines(block.text):
+            lines.append(line)
+            if block.kind == "heading":
+                explicit_heading_indices.add(len(lines) - 1)
+
+    if not lines:
+        return None
+
+    heading_indices = _heading_indices(lines, explicit_heading_indices)
+    sections = _sections(lines, heading_indices)
+    hierarchy = _hierarchy(lines, heading_indices, source.title)
+    ctas = _ctas(lines, sections)
+    semantic_cards = _semantic_cards(blocks, sections, card_anchor_lines)
+    heuristic_cards = _cards(lines, sections, heading_indices)
+    cards = _deduplicate_cards([*semantic_cards, *heuristic_cards])
+    sections = _annotate_sections(sections, ctas, cards)
+    return SiteStructureAnalysis(
+        run_id=source.run_id,
+        source_url=source.source_url,
+        source_content_hash=source.content_hash,
+        title=source.title,
+        status="extracted",
+        sections=sections,
+        calls_to_action=ctas,
+        cards=cards,
+        hierarchy=hierarchy,
+        extracted_at=utc_now(),
+    )
+
+
+def _is_page_content_block(block: SemanticBlock) -> bool:
+    """Keep meaningful page content while excluding navigation and footer chrome."""
+
+    ancestry = set(block.ancestry)
+    if ancestry & _EXCLUDED_REGIONS:
+        return False
+    # Header is preserved in the sidecar but commonly contains site navigation.
+    # Its H1/H2 headings remain useful; labels, lists, and cards do not.
+    return not ("header" in ancestry and block.kind in {"paragraph", "list_item", "card"})
+
+
+def _extract_text_structure(
+    source: SourceRecord,
+    lines: list[str],
+) -> SiteStructureAnalysis:
     heading_indices = _heading_indices(lines)
     sections = _sections(lines, heading_indices)
     hierarchy = _hierarchy(lines, heading_indices, source.title)
@@ -113,10 +212,14 @@ def _normalized_lines(text: str) -> list[str]:
     return [" ".join(line.split()) for line in text.splitlines() if line.strip()]
 
 
-def _heading_indices(lines: list[str]) -> list[int]:
+def _heading_indices(
+    lines: list[str],
+    explicit_heading_indices: set[int] | None = None,
+) -> list[int]:
     headings = [0]
+    explicit = explicit_heading_indices or set()
     for index, line in enumerate(lines[1:], start=1):
-        if _SECTION_PATTERN.match(line):
+        if index in explicit or _SECTION_PATTERN.match(line):
             headings.append(index)
     return headings
 
@@ -187,6 +290,36 @@ def _ctas(lines: list[str], sections: list[SectionEvidence]) -> list[CallToActio
     return ctas
 
 
+def _semantic_cards(
+    blocks: Sequence[SemanticBlock],
+    sections: list[SectionEvidence],
+    anchor_lines: dict[int, int],
+) -> list[CardEvidence]:
+    """Turn explicit card boundaries into candidates before applying deduplication."""
+
+    cards: list[CardEvidence] = []
+    for block_index, block in enumerate(blocks):
+        if block.kind != "card" or not _is_page_content_block(block):
+            continue
+        card_lines = _normalized_lines(block.text)
+        if not card_lines:
+            continue
+        title = card_lines[0]
+        if _is_generic_card_label(title) or not _is_short_label(title):
+            continue
+        line_number = anchor_lines.get(block_index, 1)
+        cards.append(
+            CardEvidence(
+                title=title,
+                description=" ".join(card_lines[1:]) or None,
+                line_number=line_number,
+                section=_section_for_line(line_number, sections),
+                confidence="high",
+            )
+        )
+    return cards
+
+
 def _cards(
     lines: list[str],
     sections: list[SectionEvidence],
@@ -197,16 +330,18 @@ def _cards(
     for index, line in enumerate(lines):
         bullet = _BULLET_PATTERN.match(line)
         if bullet:
-            cards.append(
-                CardEvidence(
-                    title=bullet.group(1),
-                    line_number=index + 1,
-                    section=_section_for_line(index + 1, sections),
-                    confidence="medium",
+            title = bullet.group(1)
+            if not _is_generic_card_label(title):
+                cards.append(
+                    CardEvidence(
+                        title=title,
+                        line_number=index + 1,
+                        section=_section_for_line(index + 1, sections),
+                        confidence="medium",
+                    )
                 )
-            )
             continue
-        if index in section_heading_indices or not _is_short_label(line):
+        if index in section_heading_indices or _is_generic_card_label(line) or not _is_short_label(line):
             continue
         if index + 1 >= len(lines) or _is_short_label(lines[index + 1]):
             continue
@@ -219,7 +354,29 @@ def _cards(
                 confidence="low",
             )
         )
-    return cards
+    return _deduplicate_cards(cards)
+
+
+def _deduplicate_cards(cards: Sequence[CardEvidence]) -> list[CardEvidence]:
+    """Avoid emitting the same UI card label repeatedly across a source page."""
+
+    deduplicated: list[CardEvidence] = []
+    seen_titles: set[str] = set()
+    for card in cards:
+        key = _normalized_label(card.title)
+        if not key or key in seen_titles or _is_generic_card_label(card.title):
+            continue
+        seen_titles.add(key)
+        deduplicated.append(card)
+    return deduplicated
+
+
+def _is_generic_card_label(value: str) -> bool:
+    return _normalized_label(value) in _GENERIC_CARD_LABELS
+
+
+def _normalized_label(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.lower())).strip()
 
 
 def _is_short_label(value: str) -> bool:

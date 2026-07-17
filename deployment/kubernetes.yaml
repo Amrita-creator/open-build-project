@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: inspo-mcp-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inspo-mcp
+spec:
+  selector:
+    app: inspo-mcp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inspo-mcp
+spec:
+  # SQLite and local capture storage require one writer. Use a shared database
+  # and object store before increasing replicas.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inspo-mcp
+  template:
+    metadata:
+      labels:
+        app: inspo-mcp
+    spec:
+      containers:
+        - name: mcp
+          image: registry.example.com/inspo-mcp:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: INSPO_MCP_ENVIRONMENT
+              value: production
+            - name: INSPO_MCP_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: inspo-mcp-secrets
+                  key: auth-token
+            - name: INSPO_MCP_DATABASE_PATH
+              value: /var/lib/inspo-mcp/inspo_mcp.db
+            - name: INSPO_MCP_CAPTURE_ROOT
+              value: /var/lib/inspo-mcp/captures
+            - name: PORT
+              value: "8080"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/inspo-mcp
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: inspo-mcp-data

@@ -12,7 +12,8 @@ from pydantic import HttpUrl
 
 from inspo_mcp.models.source import SourceStatus
 from inspo_mcp.repositories.sources import SourceRepository
-from inspo_mcp.services.capture import CaptureService, FetchedResponse
+from inspo_mcp.schemas import InspirationScreenshot
+from inspo_mcp.services.capture import CaptureService, FetchedResponse, sanitize_page
 from inspo_mcp.services.url_safety import SafeUrl, validate_public_urls
 from inspo_mcp.storage.capture_store import LocalCaptureStore
 from inspo_mcp.storage.database import SqliteDatabase
@@ -99,6 +100,7 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.redirect_chain, (initial.url, final.url))
         self.assertEqual(record.content_hash, hashlib.sha256(body).hexdigest())
         self.assertTrue(Path(record.screenshot_path or "").is_file())
+        self.assertTrue(Path(record.semantic_document_path or "").is_file())
         text = Path(record.visible_text_path or "").read_text(encoding="utf-8")
         self.assertIn("Welcome", text)
         self.assertIn("Build faster.", text)
@@ -111,6 +113,29 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached_records, records)
         self.assertEqual(fetcher.calls, [initial.url, final.url])
         self.assertEqual(screenshotter.calls, [final.url])
+
+    def test_preserves_semantics_and_prefers_utf8_over_a_misleading_charset(self) -> None:
+        page = sanitize_page(
+            b"""
+            <html><head><meta charset='utf-8'><title>Curly \xe2\x80\x9cquotes\xe2\x80\x9d</title></head>
+            <body><header><nav><a>News</a><a>Get started</a></nav></header>
+            <main><section><h1>Ship faster</h1><p>Build reusable interfaces.</p>
+            <div class='feature-card'><h2>Realtime reports</h2><p>See the latest product data.</p></div>
+            </section></main><footer><a>Sign up</a></footer></body></html>
+            """,
+            "text/html; charset=iso-8859-1",
+            max_visible_text_chars=10_000,
+        )
+
+        self.assertEqual(page.title, 'Curly “quotes”')
+        self.assertIn('Ship faster', page.visible_text)
+        self.assertIn('“quotes”', page.title or '')
+        self.assertEqual(
+            {block.kind for block in page.semantic_blocks},
+            {"header", "nav", "main", "section", "heading", "paragraph", "card", "footer"},
+        )
+        card = next(block for block in page.semantic_blocks if block.kind == "card")
+        self.assertIn("Realtime reports", card.text)
 
     async def test_blocks_private_redirect_and_persists_failure(self) -> None:
         initial = safe_url("https://example.com")
@@ -183,6 +208,67 @@ class CaptureServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Automatic capture was unavailable", record.capture_note or "")
         self.assertIn("Retry-After: 120", record.capture_note or "")
         self.assertEqual(self.repository.list_for_run("run_fallback_test"), records)
+
+    async def test_primary_screenshot_is_accepted_without_a_url_request(self) -> None:
+        image_path = Path(self._temporary_directory.name) / "primary.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00primary-image")
+        service = CaptureService(
+            self.repository,
+            self.store,
+            fetcher=FakeFetcher({}),
+            screenshotter=FakeScreenshotter(),
+            resolver=public_resolver,
+        )
+
+        records = await service.capture_primary_screenshots(
+            "run_primary_screenshot",
+            (InspirationScreenshot(image_path=str(image_path), label="Product reference"),),
+        )
+        record = records[0]
+
+        self.assertEqual(record.status, SourceStatus.USER_PROVIDED)
+        self.assertTrue(record.source_url.startswith("user-screenshot://"))
+        self.assertEqual(record.title, "Product reference")
+        self.assertTrue(Path(record.screenshot_path or "").is_file())
+        self.assertIn("primary visual evidence", record.capture_note or "")
+        self.assertEqual(self.repository.list_for_run("run_primary_screenshot"), records)
+
+    async def test_primary_screenshot_can_be_safely_enriched_with_url_text(self) -> None:
+        initial = safe_url("https://example.com")
+        image_path = Path(self._temporary_directory.name) / "primary.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00primary-image")
+        body = b"<html><head><title>Example</title></head><body><main><h1>Build faster</h1></main></body></html>"
+        service = CaptureService(
+            self.repository,
+            self.store,
+            fetcher=FakeFetcher(
+                {
+                    initial.url: FetchedResponse(
+                        url=initial.url,
+                        status_code=200,
+                        headers={"Content-Type": "text/html; charset=utf-8"},
+                        body=body,
+                    )
+                }
+            ),
+            screenshotter=FakeScreenshotter(),
+            resolver=public_resolver,
+        )
+
+        primary = await service.capture_primary_screenshots(
+            "run_primary_enrichment",
+            (InspirationScreenshot(source_url=initial.url, image_path=str(image_path)),),
+        )
+        enriched = await service.enrich_primary_screenshots("run_primary_enrichment", (initial,))
+        record = enriched[0]
+
+        self.assertEqual(record.status, SourceStatus.USER_PROVIDED)
+        self.assertEqual(record.source_url, initial.url)
+        self.assertEqual(record.title, "Example")
+        self.assertTrue(Path(record.visible_text_path or "").is_file())
+        self.assertTrue(Path(record.semantic_document_path or "").is_file())
+        self.assertEqual(record.screenshot_path, primary[0].screenshot_path)
+        self.assertIn("text enrichment succeeded", record.capture_note or "")
 
 
 if __name__ == "__main__":

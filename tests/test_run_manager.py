@@ -7,9 +7,11 @@ from pathlib import Path
 from inspo_mcp.models.run import RunStatus
 from inspo_mcp.models.source import SourceRecord, SourceStatus, utc_now
 from inspo_mcp.repositories.runs import RunRepository
-from inspo_mcp.schemas import InspirationRequest
+from inspo_mcp.repositories.vision_analyses import VisionAnalysisRepository
+from inspo_mcp.schemas import InspirationRequest, ScreenshotVisionAnalysis
 from inspo_mcp.services.run_manager import RunManager
 from inspo_mcp.services.url_safety import SafeUrl
+from inspo_mcp.services.vision import VisionAnalysisService
 from inspo_mcp.storage.database import SqliteDatabase
 
 
@@ -17,8 +19,9 @@ class RunManagerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self._temporary_directory = tempfile.TemporaryDirectory()
         database_path = Path(self._temporary_directory.name) / "runs.db"
-        repository = RunRepository(SqliteDatabase(database_path))
-        self.manager = RunManager(repository)
+        self.database = SqliteDatabase(database_path)
+        self.repository = RunRepository(self.database)
+        self.manager = RunManager(self.repository)
 
     def tearDown(self) -> None:
         self._temporary_directory.cleanup()
@@ -151,6 +154,65 @@ class RunManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(kit.warnings), 1)
         self.assertIn("user-provided screenshot", kit.warnings[0].message.lower())
 
+    async def test_screenshot_only_run_skips_automatic_url_capture(self) -> None:
+        from inspo_mcp.schemas import InspirationScreenshot
+
+        request = InspirationRequest(
+            project_goal="Build a developer tool landing page.",
+            inspiration_screenshots=[
+                InspirationScreenshot(image_path="C:/screenshots/one.png", label="One"),
+                InspirationScreenshot(image_path="C:/screenshots/two.png", label="Two"),
+            ],
+        )
+        capture_service = _CaptureSpy()
+
+        kit = await self.manager.create_captured_mock_kit(
+            request,
+            (),
+            capture_service,  # type: ignore[arg-type]
+        )
+        run = self.manager.get_run(kit.run_id)
+
+        self.assertEqual(capture_service.safe_urls, ())
+        self.assertEqual(len(capture_service.primary_screenshots or ()), 2)
+        self.assertEqual(run.inspiration_urls, request.source_identifiers)
+        self.assertTrue(all("primary visual evidence" in warning.message for warning in kit.warnings))
+
+    async def test_defers_m5_and_completes_it_later(self) -> None:
+        from inspo_mcp.schemas import InspirationScreenshot
+
+        request = InspirationRequest(
+            project_goal="Build a developer tool landing page.",
+            inspiration_screenshots=[
+                InspirationScreenshot(image_path="C:/screenshots/one.png"),
+                InspirationScreenshot(image_path="C:/screenshots/two.png"),
+            ],
+        )
+        vision_repository = VisionAnalysisRepository(self.database)
+        manager = RunManager(
+            self.repository,
+            vision_service=VisionAnalysisService(vision_repository, _M5Spy()),
+        )
+
+        kit = await manager.create_captured_mock_kit(
+            request,
+            (),
+            _CaptureSpy(),  # type: ignore[arg-type]
+            defer_vision=True,
+        )
+
+        self.assertEqual(self.repository.get(kit.run_id).status, RunStatus.GENERATING)
+        self.assertEqual(
+            [analysis.status for analysis in vision_repository.list_for_run(kit.run_id)],
+            ["pending", "pending"],
+        )
+        self.assertTrue(any("running in the background" in warning.message for warning in kit.warnings))
+
+        analyses = await manager.analyze_deferred_vision(kit.run_id)
+
+        self.assertEqual([analysis.status for analysis in analyses], ["completed", "completed"])
+        self.assertEqual(self.repository.get(kit.run_id).status, RunStatus.COMPLETED)
+
 
 class _CaptureSpy:
     """Small in-memory capture boundary used to verify the run orchestration."""
@@ -159,6 +221,7 @@ class _CaptureSpy:
         self.run_id: str | None = None
         self.safe_urls: tuple[SafeUrl, ...] | None = None
         self.fallback_screenshots: dict[str, str] | None = None
+        self.primary_screenshots: tuple[object, ...] | None = None
         self.use_user_screenshot = use_user_screenshot
 
     async def capture_sources(
@@ -171,6 +234,8 @@ class _CaptureSpy:
         self.run_id = run_id
         self.safe_urls = safe_urls
         self.fallback_screenshots = fallback_screenshots
+        if not safe_urls:
+            return ()
         now = utc_now()
         return (
             SourceRecord(
@@ -188,6 +253,38 @@ class _CaptureSpy:
             ),
             self._second_source(run_id, safe_urls[1], now),
         )
+
+    async def capture_primary_screenshots(
+        self,
+        run_id: str,
+        screenshots: tuple[object, ...] | list[object],
+    ) -> tuple[SourceRecord, ...]:
+        self.primary_screenshots = tuple(screenshots)
+        now = utc_now()
+        return tuple(
+            SourceRecord(
+                run_id=run_id,
+                source_url=screenshot.source_identifier,  # type: ignore[attr-defined]
+                final_url=None,
+                status=SourceStatus.USER_PROVIDED,
+                http_status=None,
+                title=screenshot.label,  # type: ignore[attr-defined]
+                visible_text_path=None,
+                screenshot_path=f"{index}.png",
+                content_hash=f"{index:064x}",
+                redirect_chain=(screenshot.source_identifier,),  # type: ignore[attr-defined]
+                captured_at=now,
+                capture_note="User-provided screenshot accepted as primary visual evidence.",
+            )
+            for index, screenshot in enumerate(screenshots, start=1)
+        )
+
+    async def enrich_primary_screenshots(
+        self,
+        run_id: str,
+        safe_urls: tuple[SafeUrl, ...],
+    ) -> tuple[SourceRecord, ...]:
+        return ()
 
     def _second_source(
         self,
@@ -223,6 +320,22 @@ class _CaptureSpy:
             redirect_chain=(source.url,),
             captured_at=captured_at,
             error_message="Capture returned HTTP 502.",
+        )
+
+
+class _M5Spy:
+    async def analyze(
+        self,
+        source: SourceRecord,
+        text_analysis: object | None,
+    ) -> ScreenshotVisionAnalysis:
+        return ScreenshotVisionAnalysis(
+            run_id=source.run_id,
+            source_url=source.source_url,
+            source_content_hash=source.content_hash,
+            status="completed",
+            summary="Background visual analysis.",
+            analyzed_at=utc_now(),
         )
 
 

@@ -7,7 +7,7 @@ import hashlib
 import re
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Mapping, Protocol, Sequence
@@ -15,8 +15,10 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 from pydantic import HttpUrl, ValidationError
-from inspo_mcp.models.source import SourceRecord, SourceStatus, utc_now
+from inspo_mcp.models.source import SemanticBlock, SourceRecord, SourceStatus, utc_now
 from inspo_mcp.repositories.sources import SourceRepository
+from inspo_mcp.schemas import InspirationScreenshot
+from inspo_mcp.services.privacy import redact_page_values, redact_text
 from inspo_mcp.services.url_safety import SafeUrl, UrlSafetyError, validate_public_urls
 from inspo_mcp.storage.capture_store import LocalCaptureStore
 
@@ -58,6 +60,14 @@ _BLOCK_TEXT_TAGS = frozenset(
         "ul",
     }
 )
+_SEMANTIC_CONTAINER_TAGS = frozenset(
+    {"header", "nav", "main", "section", "article", "aside", "footer"}
+)
+_SEMANTIC_TEXT_TAGS = frozenset({"p", "li"})
+_VOID_TAGS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+)
+_CARD_MARKERS = frozenset({"card", "tile", "panel", "bento"})
 
 
 class CaptureError(RuntimeError):
@@ -106,6 +116,8 @@ class SanitizedPage:
 
     title: str | None
     visible_text: str
+    semantic_blocks: tuple[SemanticBlock, ...]
+    redaction_counts: dict[str, int]
 
 
 class PageFetcher(Protocol):
@@ -290,6 +302,7 @@ class CaptureService:
                 if previous.status is SourceStatus.CAPTURED and self._store.has_complete_evidence(
                     previous.visible_text_path,
                     previous.screenshot_path,
+                    previous.semantic_document_path,
                 ):
                     captured.append(previous)
                     continue
@@ -307,6 +320,141 @@ class CaptureService:
             )
         return tuple(captured)
 
+    async def capture_primary_screenshots(
+        self,
+        run_id: str,
+        screenshots: Sequence[InspirationScreenshot],
+    ) -> tuple[SourceRecord, ...]:
+        """Persist user screenshots as the primary visual evidence for a run.
+
+        No request is made to an optional URL here. URL text enrichment happens
+        separately and never replaces the user-provided visual artifact.
+        """
+
+        existing = {record.source_url: record for record in self._repository.list_for_run(run_id)}
+        sources: list[SourceRecord] = []
+        for screenshot in screenshots:
+            source_identifier = screenshot.source_identifier
+            previous = existing.get(source_identifier)
+            if previous and previous.status is SourceStatus.USER_PROVIDED and self._store.has_screenshot(
+                previous.screenshot_path
+            ):
+                sources.append(previous)
+                continue
+
+            image_path = self._store.save_user_screenshot(
+                run_id,
+                source_identifier,
+                screenshot.image_path,
+                max_bytes=self._settings.max_user_screenshot_bytes,
+            )
+            label = redact_text(screenshot.label)
+            source = SourceRecord(
+                run_id=run_id,
+                source_url=source_identifier,
+                final_url=str(screenshot.source_url) if screenshot.source_url is not None else None,
+                status=SourceStatus.USER_PROVIDED,
+                http_status=None,
+                title=label.text or None,
+                visible_text_path=None,
+                screenshot_path=str(image_path),
+                content_hash=_hash_file(image_path),
+                redirect_chain=(source_identifier,),
+                captured_at=utc_now(),
+                capture_note=(
+                    "User-provided screenshot accepted as primary visual evidence. "
+                    "It can be compared with any available text evidence during M5 vision analysis."
+                ),
+                redaction_counts=label.counts,
+            )
+            sources.append(self._repository.upsert(source))
+        return tuple(sources)
+
+    async def enrich_primary_screenshots(
+        self,
+        run_id: str,
+        sources: Sequence[SafeUrl],
+    ) -> tuple[SourceRecord, ...]:
+        """Add text/semantic evidence to primary screenshots without recapturing visuals."""
+
+        existing = {record.source_url: record for record in self._repository.list_for_run(run_id)}
+        enriched: list[SourceRecord] = []
+        for source in sources:
+            primary = existing.get(source.url)
+            if primary is None or primary.status is not SourceStatus.USER_PROVIDED:
+                continue
+            try:
+                response, final_source = await self._fetch_with_safe_redirects(source, [source.url])
+                if not 200 <= response.status_code < 300:
+                    raise CaptureError(
+                        f"Text enrichment returned HTTP {response.status_code}.",
+                        http_status=response.status_code,
+                        final_url=final_source.url,
+                    )
+                page = sanitize_page(
+                    response.body,
+                    _header_value(response.headers, "content-type"),
+                    max_visible_text_chars=self._settings.max_visible_text_chars,
+                )
+                text_path = self._store.save_visible_text(run_id, source.url, page.visible_text)
+                semantic_path = self._store.save_semantic_document(
+                    run_id,
+                    source.url,
+                    page.semantic_blocks,
+                )
+                enriched.append(
+                    self._repository.upsert(
+                        SourceRecord(
+                            run_id=primary.run_id,
+                            source_url=primary.source_url,
+                            final_url=final_source.url,
+                            status=SourceStatus.USER_PROVIDED,
+                            http_status=response.status_code,
+                            title=page.title or primary.title,
+                            visible_text_path=str(text_path),
+                            semantic_document_path=str(semantic_path),
+                            screenshot_path=primary.screenshot_path,
+                            content_hash=hashlib.sha256(response.body).hexdigest(),
+                            redirect_chain=(source.url, final_source.url)
+                            if final_source.url != source.url
+                            else (source.url,),
+                            captured_at=utc_now(),
+                            capture_note=(
+                                "User-provided screenshot accepted as primary visual evidence; "
+                                "safe URL text enrichment succeeded."
+                            ),
+                            redaction_counts=page.redaction_counts,
+                        )
+                    )
+                )
+            except Exception as error:
+                enriched.append(
+                    self._repository.upsert(
+                        SourceRecord(
+                            run_id=primary.run_id,
+                            source_url=primary.source_url,
+                            final_url=primary.final_url,
+                            status=SourceStatus.USER_PROVIDED,
+                            http_status=(
+                                error.http_status if isinstance(error, CaptureError) else primary.http_status
+                            ),
+                            title=primary.title,
+                            visible_text_path=primary.visible_text_path,
+                            semantic_document_path=primary.semantic_document_path,
+                            screenshot_path=primary.screenshot_path,
+                            content_hash=primary.content_hash,
+                            redirect_chain=primary.redirect_chain,
+                            captured_at=utc_now(),
+                            capture_note=(
+                                "User-provided screenshot accepted as primary visual evidence. "
+                                f"Optional URL text enrichment was unavailable: {error}"
+                            ),
+                            redaction_counts=primary.redaction_counts,
+                        )
+                    )
+                )
+        return tuple(enriched)
+
     async def _capture_source(
         self,
         run_id: str,
@@ -319,8 +467,10 @@ class CaptureService:
         http_status: int | None = None
         title: str | None = None
         visible_text_path: str | None = None
+        semantic_document_path: str | None = None
         screenshot_path: str | None = None
         content_hash: str | None = None
+        redaction_counts: dict[str, int] = {}
         image_path: Path | None = None
 
         try:
@@ -346,8 +496,15 @@ class CaptureService:
                 max_visible_text_chars=self._settings.max_visible_text_chars,
             )
             title = page.title
+            redaction_counts = page.redaction_counts
             text_path = self._store.save_visible_text(run_id, source.url, page.visible_text)
             visible_text_path = str(text_path)
+            semantic_path = self._store.save_semantic_document(
+                run_id,
+                source.url,
+                page.semantic_blocks,
+            )
+            semantic_document_path = str(semantic_path)
             content_hash = hashlib.sha256(response.body).hexdigest()
 
             image_path = self._store.screenshot_path(run_id, source.url)
@@ -365,10 +522,12 @@ class CaptureService:
                     http_status=http_status,
                     title=title,
                     visible_text_path=visible_text_path,
+                    semantic_document_path=semantic_document_path,
                     screenshot_path=screenshot_path,
                     content_hash=content_hash,
                     redirect_chain=tuple(redirect_chain),
                     captured_at=utc_now(),
+                    redaction_counts=redaction_counts,
                 )
             )
         except Exception as error:
@@ -405,11 +564,13 @@ class CaptureService:
                     http_status=http_status,
                     title=title,
                     visible_text_path=visible_text_path,
+                    semantic_document_path=semantic_document_path,
                     screenshot_path=screenshot_path,
                     content_hash=content_hash,
                     redirect_chain=tuple(redirect_chain),
                     captured_at=utc_now(),
                     error_message=str(error),
+                    redaction_counts=redaction_counts,
                 )
             )
 
@@ -441,6 +602,7 @@ class CaptureService:
                 http_status=http_status,
                 title=None,
                 visible_text_path=None,
+                semantic_document_path=None,
                 screenshot_path=str(image_path),
                 content_hash=_hash_file(image_path),
                 redirect_chain=redirect_chain,
@@ -526,34 +688,72 @@ def sanitize_page(
     if media_type not in _SUPPORTED_MEDIA_TYPES:
         raise CaptureError(f"Unsupported content type for page capture: {media_type}")
 
-    charset_match = re.search(r"charset\s*=\s*[\"']?([^;\s\"']+)", normalized_content_type)
-    charset = charset_match.group(1) if charset_match else "utf-8"
-    try:
-        decoded = body.decode(charset, errors="replace")
-    except LookupError:
-        decoded = body.decode("utf-8", errors="replace")
+    decoded = _decode_page(body, normalized_content_type)
 
     if media_type == "text/plain":
-        return SanitizedPage(title=None, visible_text=_compact_text(decoded, max_visible_text_chars))
+        return _redact_sanitized_page(SanitizedPage(
+            title=None,
+            visible_text=_compact_text(decoded, max_visible_text_chars),
+            semantic_blocks=(),
+            redaction_counts={},
+        ))
 
-    parser = _VisibleTextParser()
+    parser = _SemanticPageParser()
     parser.feed(decoded)
     parser.close()
-    return SanitizedPage(
+    parser.finish()
+    return _redact_sanitized_page(SanitizedPage(
         title=_compact_text("".join(parser.title_parts), max_visible_text_chars) or None,
         visible_text=_compact_text("".join(parser.visible_parts), max_visible_text_chars),
+        semantic_blocks=tuple(parser.semantic_blocks),
+        redaction_counts={},
+    ))
+
+
+def _redact_sanitized_page(page: SanitizedPage) -> SanitizedPage:
+    """Remove common PII and secrets before page evidence is written to disk."""
+
+    title = redact_text(page.title)
+    visible_text = redact_text(page.visible_text)
+    block_texts, block_counts = redact_page_values(block.text for block in page.semantic_blocks)
+    counts: dict[str, int] = {}
+    for source_counts in (title.counts, visible_text.counts, block_counts):
+        for kind, count in source_counts.items():
+            counts[kind] = counts.get(kind, 0) + count
+    return replace(
+        page,
+        title=title.text or None,
+        visible_text=visible_text.text,
+        semantic_blocks=tuple(
+            replace(block, text=text) for block, text in zip(page.semantic_blocks, block_texts)
+        ),
+        redaction_counts=counts,
     )
 
 
-class _VisibleTextParser(HTMLParser):
-    """Extract visible, non-script text without retaining HTML or attributes."""
+@dataclass
+class _OpenElement:
+    """Open HTML element with text collected only for meaningful semantic blocks."""
+
+    tag: str
+    semantic_tag: str
+    kind: str | None
+    ancestry: tuple[str, ...]
+    heading_level: int | None = None
+    parts: list[str] = field(default_factory=list)
+
+
+class _SemanticPageParser(HTMLParser):
+    """Retain safe visible text plus text-only semantic HTML boundaries."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.title_parts: list[str] = []
         self.visible_parts: list[str] = []
+        self.semantic_blocks: list[SemanticBlock] = []
         self._suppressed_depth = 0
         self._in_title = False
+        self._stack: list[_OpenElement] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
@@ -568,10 +768,26 @@ class _VisibleTextParser(HTMLParser):
             return
         if tag in _BLOCK_TEXT_TAGS:
             self.visible_parts.append("\n")
+            self._append_separator_to_open_elements()
+        if tag in _VOID_TAGS:
+            return
+
+        semantic_tag = "card" if _is_card_like(attrs) else _semantic_tag(tag, attrs)
+        kind, heading_level = _semantic_kind(tag, semantic_tag, attrs)
+        ancestry = tuple(element.semantic_tag for element in self._stack) + (semantic_tag,)
+        self._stack.append(
+            _OpenElement(
+                tag=tag,
+                semantic_tag=semantic_tag,
+                kind=kind,
+                ancestry=ancestry,
+                heading_level=heading_level,
+            )
+        )
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() in _BLOCK_TEXT_TAGS:
-            self.visible_parts.append("\n")
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
@@ -583,6 +799,18 @@ class _VisibleTextParser(HTMLParser):
             return
         if tag in _BLOCK_TEXT_TAGS:
             self.visible_parts.append("\n")
+            self._append_separator_to_open_elements()
+
+        match_index = next(
+            (index for index in range(len(self._stack) - 1, -1, -1) if self._stack[index].tag == tag),
+            None,
+        )
+        if match_index is None:
+            return
+        closing_elements = self._stack[match_index:]
+        del self._stack[match_index:]
+        for element in reversed(closing_elements):
+            self._record_semantic_block(element)
 
     def handle_data(self, data: str) -> None:
         if self._suppressed_depth:
@@ -591,6 +819,126 @@ class _VisibleTextParser(HTMLParser):
             self.title_parts.append(data)
             return
         self.visible_parts.append(data)
+        for element in self._stack:
+            if element.kind is not None:
+                element.parts.append(data)
+
+    def finish(self) -> None:
+        """Record valid open elements if a page ends with imperfect HTML."""
+
+        while self._stack:
+            self._record_semantic_block(self._stack.pop())
+
+    def _append_separator_to_open_elements(self) -> None:
+        for element in self._stack:
+            if element.kind is not None:
+                element.parts.append("\n")
+
+    def _record_semantic_block(self, element: _OpenElement) -> None:
+        if element.kind is None:
+            return
+        text = _compact_text("".join(element.parts), max_chars=10_000)
+        if not text:
+            return
+        self.semantic_blocks.append(
+            SemanticBlock(
+                kind=element.kind,
+                tag=element.semantic_tag,
+                text=text,
+                ancestry=element.ancestry,
+                heading_level=element.heading_level,
+            )
+        )
+
+
+def _semantic_tag(tag: str, attrs: list[tuple[str, str | None]]) -> str:
+    values = {name.lower(): value or "" for name, value in attrs}
+    role = values.get("role", "").lower()
+    if role in {"navigation", "menubar"}:
+        return "nav"
+    if role == "contentinfo":
+        return "footer"
+    if role == "main":
+        return "main"
+    return tag
+
+
+def _semantic_kind(
+    tag: str,
+    semantic_tag: str,
+    attrs: list[tuple[str, str | None]],
+) -> tuple[str | None, int | None]:
+    if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        return "heading", int(tag[1])
+    if _is_card_like(attrs):
+        return "card", None
+    if semantic_tag in _SEMANTIC_CONTAINER_TAGS:
+        return semantic_tag, None
+    if tag == "p":
+        return "paragraph", None
+    if tag == "li":
+        return "list_item", None
+    return None, None
+
+
+def _is_card_like(attrs: list[tuple[str, str | None]]) -> bool:
+    values = {
+        (value or "").lower()
+        for name, value in attrs
+        if name.lower() in {"class", "id", "data-component", "data-testid"}
+    }
+    return any(marker in value for value in values for marker in _CARD_MARKERS)
+
+
+def _decode_page(body: bytes, content_type: str) -> str:
+    """Decode HTML defensively, preferring UTF-8 when a header is misleading."""
+
+    candidates: list[str] = []
+    charset_match = re.search(r"charset\s*=\s*[\"']?([^;\s\"']+)", content_type)
+    if charset_match:
+        candidates.append(charset_match.group(1))
+    meta_charset = _html_meta_charset(body)
+    if meta_charset:
+        candidates.append(meta_charset)
+    candidates.extend(("utf-8", "windows-1252", "iso-8859-1"))
+
+    decoded_candidates: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for position, charset in enumerate(candidates):
+        normalized_charset = charset.lower().strip()
+        if not normalized_charset or normalized_charset in seen:
+            continue
+        seen.add(normalized_charset)
+        try:
+            decoded = body.decode(normalized_charset, errors="replace")
+        except LookupError:
+            continue
+        decoded_candidates.append((_decode_quality(decoded), position, decoded))
+
+    if not decoded_candidates:
+        return body.decode("utf-8", errors="replace")
+    return min(decoded_candidates, key=lambda candidate: (candidate[0], candidate[1]))[2]
+
+
+def _html_meta_charset(body: bytes) -> str | None:
+    """Read a declared HTML charset from the first bytes without decoding them."""
+
+    head = body[:8192]
+    match = re.search(
+        br"<meta\b[^>]*\bcharset\s*=\s*[\"']?([a-zA-Z0-9._-]+)",
+        head,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).decode("ascii") if match else None
+
+
+def _decode_quality(value: str) -> int:
+    """Lower values indicate fewer decoding failures or common mojibake markers."""
+
+    replacement_score = value.count("\ufffd") * 100
+    control_score = sum(1 for character in value if "\x80" <= character <= "\x9f") * 20
+    mojibake_score = sum(value.count(marker) * 25 for marker in ("Ã", "Â", "â€", "â€™"))
+    return replacement_score + control_score + mojibake_score
 
 
 def _is_hidden(attrs: list[tuple[str, str | None]]) -> bool:

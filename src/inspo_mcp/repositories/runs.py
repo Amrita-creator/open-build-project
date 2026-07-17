@@ -32,10 +32,20 @@ class RunRepository:
                     framework TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    error_message TEXT
+                    error_message TEXT,
+                    privacy_mode INTEGER NOT NULL DEFAULT 0,
+                    retention_expires_at TEXT
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(runs)").fetchall()
+            }
+            if "privacy_mode" not in columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN privacy_mode INTEGER NOT NULL DEFAULT 0")
+            if "retention_expires_at" not in columns:
+                connection.execute("ALTER TABLE runs ADD COLUMN retention_expires_at TEXT")
 
     def create(self, run: RunRecord) -> RunRecord:
         """Save a newly received run."""
@@ -45,8 +55,8 @@ class RunRepository:
                 """
                 INSERT INTO runs (
                     run_id, status, inspiration_urls, project_goal, framework,
-                    created_at, updated_at, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, error_message, privacy_mode, retention_expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.run_id,
@@ -57,9 +67,33 @@ class RunRepository:
                     run.created_at,
                     run.updated_at,
                     run.error_message,
+                    int(run.privacy_mode),
+                    run.retention_expires_at,
                 ),
             )
         return run
+
+    def delete_expired(self, now: str) -> tuple[str, ...]:
+        """Delete expired run records and all associated SQLite artifacts."""
+
+        with self._database.connection() as connection:
+            rows = connection.execute(
+                "SELECT run_id FROM runs WHERE retention_expires_at IS NOT NULL AND retention_expires_at <= ?",
+                (now,),
+            ).fetchall()
+            run_ids = tuple(row["run_id"] for row in rows)
+            for run_id in run_ids:
+                self._delete_related(connection, run_id)
+        return run_ids
+
+    def delete(self, run_id: str) -> None:
+        """Delete one run and its associated SQLite artifacts."""
+
+        with self._database.connection() as connection:
+            exists = connection.execute("SELECT 1 FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            if exists is None:
+                raise RunNotFoundError(f"Run not found: {run_id}")
+            self._delete_related(connection, run_id)
 
     def get(self, run_id: str) -> RunRecord:
         """Load one run or raise a domain-specific not-found error."""
@@ -106,5 +140,17 @@ class RunRepository:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             error_message=row["error_message"],
+            privacy_mode=bool(row["privacy_mode"]),
+            retention_expires_at=row["retention_expires_at"],
         )
 
+    @staticmethod
+    def _delete_related(connection: sqlite3.Connection, run_id: str) -> None:
+        existing_tables = {
+            row["name"]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        for table_name in ("kits", "vision_analyses", "site_analyses", "sources"):
+            if table_name in existing_tables:
+                connection.execute(f"DELETE FROM {table_name} WHERE run_id = ?", (run_id,))
+        connection.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from uuid import uuid4
 
@@ -17,6 +17,7 @@ class RunStatus(str, Enum):
     VALIDATING = "validating"
     CAPTURING = "capturing"
     EXTRACTING = "extracting"
+    ANALYZING = "analyzing"
     GENERATING = "generating"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -40,6 +41,8 @@ class RunRecord:
     created_at: str
     updated_at: str
     error_message: str | None = None
+    privacy_mode: bool = False
+    retention_expires_at: str | None = None
 
     @classmethod
     def new(cls, request: InspirationRequest) -> "RunRecord":
@@ -49,11 +52,15 @@ class RunRecord:
         return cls(
             run_id=f"mock_{uuid4().hex[:12]}",
             status=RunStatus.RECEIVED,
-            inspiration_urls=tuple(str(url) for url in request.inspiration_urls),
+            inspiration_urls=request.source_identifiers,
             project_goal=request.project_goal,
             framework=request.framework,
             created_at=now,
             updated_at=now,
+            privacy_mode=request.privacy_mode,
+            retention_expires_at=(
+                datetime.now(timezone.utc) + timedelta(days=request.retention_days)
+            ).isoformat(),
         )
 
     def with_status(

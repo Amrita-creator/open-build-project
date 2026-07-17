@@ -28,12 +28,14 @@ class SourceRepository:
                     http_status INTEGER,
                     title TEXT,
                     visible_text_path TEXT,
+                    semantic_document_path TEXT,
                     screenshot_path TEXT,
                     content_hash TEXT,
                     redirect_chain TEXT NOT NULL,
                     captured_at TEXT NOT NULL,
                     error_message TEXT,
                     capture_note TEXT,
+                    redaction_counts TEXT NOT NULL DEFAULT '{}',
                     PRIMARY KEY (run_id, source_url)
                 )
                 """
@@ -44,6 +46,14 @@ class SourceRepository:
             }
             if "capture_note" not in columns:
                 connection.execute("ALTER TABLE sources ADD COLUMN capture_note TEXT")
+            if "semantic_document_path" not in columns:
+                connection.execute(
+                    "ALTER TABLE sources ADD COLUMN semantic_document_path TEXT"
+                )
+            if "redaction_counts" not in columns:
+                connection.execute(
+                    "ALTER TABLE sources ADD COLUMN redaction_counts TEXT NOT NULL DEFAULT '{}'"
+                )
 
     def upsert(self, source: SourceRecord) -> SourceRecord:
         """Save the latest capture outcome for a source in one run."""
@@ -53,21 +63,23 @@ class SourceRepository:
                 """
                 INSERT INTO sources (
                     run_id, source_url, final_url, status, http_status, title,
-                    visible_text_path, screenshot_path, content_hash,
-                    redirect_chain, captured_at, error_message, capture_note
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    visible_text_path, semantic_document_path, screenshot_path, content_hash,
+                    redirect_chain, captured_at, error_message, capture_note, redaction_counts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, source_url) DO UPDATE SET
                     final_url = excluded.final_url,
                     status = excluded.status,
                     http_status = excluded.http_status,
                     title = excluded.title,
                     visible_text_path = excluded.visible_text_path,
+                    semantic_document_path = excluded.semantic_document_path,
                     screenshot_path = excluded.screenshot_path,
                     content_hash = excluded.content_hash,
                     redirect_chain = excluded.redirect_chain,
                     captured_at = excluded.captured_at,
                     error_message = excluded.error_message,
-                    capture_note = excluded.capture_note
+                    capture_note = excluded.capture_note,
+                    redaction_counts = excluded.redaction_counts
                 """,
                 (
                     source.run_id,
@@ -77,12 +89,14 @@ class SourceRepository:
                     source.http_status,
                     source.title,
                     source.visible_text_path,
+                    source.semantic_document_path,
                     source.screenshot_path,
                     source.content_hash,
                     json.dumps(source.redirect_chain),
                     source.captured_at,
                     source.error_message,
                     source.capture_note,
+                    json.dumps(source.redaction_counts, sort_keys=True),
                 ),
             )
         return source
@@ -106,10 +120,12 @@ class SourceRepository:
             http_status=row["http_status"],
             title=row["title"],
             visible_text_path=row["visible_text_path"],
+            semantic_document_path=row["semantic_document_path"],
             screenshot_path=row["screenshot_path"],
             content_hash=row["content_hash"],
             redirect_chain=tuple(json.loads(row["redirect_chain"])),
             captured_at=row["captured_at"],
             error_message=row["error_message"],
             capture_note=row["capture_note"],
+            redaction_counts=json.loads(row["redaction_counts"] or "{}"),
         )
