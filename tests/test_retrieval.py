@@ -87,6 +87,33 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lookup.state, "not_ready")
         self.assertIn("get_status", lookup.message)
 
+    def test_status_requires_retry_when_any_requested_visual_analysis_failed(self) -> None:
+        first, second = self._persist_sources()
+        self.vision.upsert(
+            ScreenshotVisionAnalysis(
+                run_id=self.run.run_id,
+                source_url=first.source_url,
+                status="completed",
+                summary="Completed visual evidence.",
+                analyzed_at=utc_now(),
+            )
+        )
+        self.vision.upsert(
+            ScreenshotVisionAnalysis(
+                run_id=self.run.run_id,
+                source_url=second.source_url,
+                status="failed",
+                message="Local Ollama vision analysis timed out.",
+                analyzed_at=utc_now(),
+            )
+        )
+
+        report = self._report()
+
+        self.assertEqual(report.stage, "M5 visual evidence needs retry")
+        self.assertFalse(report.is_terminal)
+        self.assertIn("retry_vision_analysis", report.next_action)
+
     def test_stored_kit_is_retrievable_after_recreating_the_repository(self) -> None:
         self._persist_sources()
         request = InspirationRequest(
@@ -143,6 +170,42 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([analysis.status for analysis in analyses], ["completed"])
         self.assertEqual(self.runs.get(self.run.run_id).status, RunStatus.COMPLETED)
         self.assertEqual(self.vision.list_for_run(self.run.run_id)[0].status, "completed")
+
+    async def test_retry_queues_only_incomplete_vision_sources(self) -> None:
+        first, second = self._persist_sources()
+        self.vision.upsert(
+            ScreenshotVisionAnalysis(
+                run_id=self.run.run_id,
+                source_url=first.source_url,
+                status="failed",
+                message="Timed out.",
+                analyzed_at=utc_now(),
+            )
+        )
+        self.vision.upsert(
+            ScreenshotVisionAnalysis(
+                run_id=self.run.run_id,
+                source_url=second.source_url,
+                status="completed",
+                summary="Already complete.",
+                analyzed_at=utc_now(),
+            )
+        )
+        manager = RunManager(
+            self.runs,
+            vision_service=VisionAnalysisService(self.vision, _VisionSpy()),
+            source_repository=self.sources,
+            site_analysis_repository=self.structures,
+            vision_repository=self.vision,
+        )
+
+        queued = manager.retry_vision_analysis(self.run.run_id)
+        analyses = await manager.analyze_deferred_vision(self.run.run_id)
+
+        self.assertEqual([analysis.source_url for analysis in queued], [first.source_url])
+        self.assertEqual([analysis.status for analysis in analyses], ["completed"])
+        by_source = {analysis.source_url: analysis.status for analysis in self.vision.list_for_run(self.run.run_id)}
+        self.assertEqual(by_source, {first.source_url: "completed", second.source_url: "completed"})
 
     def _persist_sources(self) -> tuple[SourceRecord, SourceRecord]:
         now = utc_now()

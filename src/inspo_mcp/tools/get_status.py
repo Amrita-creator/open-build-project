@@ -37,16 +37,21 @@ def build_run_status(
     ]
     warnings = _warnings(run, sources, structures, vision_analyses)
     pending_vision = any(analysis.status == "pending" for analysis in vision_analyses)
-    completed_vision = any(analysis.status == "completed" for analysis in vision_analyses)
+    vision_by_source = {analysis.source_url: analysis for analysis in vision_analyses}
+    complete_visual_evidence = bool(run.inspiration_urls) and all(
+        vision_by_source.get(source_url) is not None
+        and vision_by_source[source_url].status == "completed"
+        for source_url in run.inspiration_urls
+    )
+    needs_vision_retry = not pending_vision and not complete_visual_evidence
     stage, progress, next_action = _run_summary(
         run,
         kit_ready=kit_ready,
         pending_vision=pending_vision,
-        completed_vision=completed_vision,
+        complete_visual_evidence=complete_visual_evidence,
+        needs_vision_retry=needs_vision_retry,
     )
-    is_terminal = kit_ready or run.status is RunStatus.FAILED or (
-        run.status is RunStatus.COMPLETED and not pending_vision
-    )
+    is_terminal = kit_ready or run.status is RunStatus.FAILED
     return RunStatusReport(
         run_id=run.run_id,
         status=run.status.value,
@@ -167,7 +172,8 @@ def _run_summary(
     *,
     kit_ready: bool,
     pending_vision: bool,
-    completed_vision: bool,
+    complete_visual_evidence: bool,
+    needs_vision_retry: bool,
 ) -> tuple[str, int, str]:
     if kit_ready:
         return (
@@ -187,11 +193,18 @@ def _run_summary(
             75,
             "Call get_status again after the local vision analysis finishes.",
         )
-    if completed_vision:
+    if complete_visual_evidence:
         return (
             "M4 and M5 evidence ready for synthesis",
             90,
             "Call generate_reusable_kit with this run_id, then use get_kit for the durable result.",
+        )
+    if needs_vision_retry:
+        return (
+            "M5 visual evidence needs retry",
+            80,
+            "Fix the local vision setup if needed, then call retry_vision_analysis with this run_id. "
+            "A final kit cannot be generated until every requested screenshot has completed M5 analysis.",
         )
     if run.status is RunStatus.COMPLETED:
         return (

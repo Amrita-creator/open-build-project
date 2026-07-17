@@ -67,8 +67,9 @@ confidential information in a product goal, URL, or screenshot.
 
 Keep the returned `run_id`. Poll `get_status` or `get_vision_analyses` while
 M5 runs. Do not invent visual findings for pending, failed, or unavailable
-sources. When at least one visual analysis is complete, call
-`generate_reusable_kit`, then `get_kit`.
+sources. Generate the final kit only after every requested visual analysis is
+completed. If status says M5 needs retry, call `retry_vision_analysis`; then
+call `generate_reusable_kit` and `get_kit`.
 
 Present an original kit with design direction, page hierarchy, components,
 tokens, accessibility needs, responsive behavior, and implementation tasks.
@@ -343,7 +344,8 @@ Keep the returned `run_id` and follow this workflow:
 1. Use `get_status` or `get_vision_analyses` to monitor M5 visual analysis.
 2. Explain source warnings clearly. Do not make up design findings for pending,
    failed, blocked, or unavailable sources.
-3. When at least one visual analysis is complete, call `generate_reusable_kit`.
+3. Only when every requested visual analysis is complete, call `generate_reusable_kit`.
+   If M5 needs retry, call `retry_vision_analysis` first.
 4. Call `get_kit` and present the design direction, blueprint, component cards,
    tokens, and prioritized build tasks.
 5. Offer `generate_component_code` only after the kit is ready and the user

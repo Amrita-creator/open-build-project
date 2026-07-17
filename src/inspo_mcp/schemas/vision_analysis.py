@@ -23,6 +23,14 @@ class ScreenshotVisionAnalysis(BaseModel):
     layout_patterns: list[str] = Field(default_factory=list, max_length=12)
     component_patterns: list[str] = Field(default_factory=list, max_length=12)
     color_direction: list[str] = Field(default_factory=list, max_length=8)
+    color_palette: list[str] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "Dominant screenshot colours extracted locally as hexadecimal values, "
+            "ordered from the most visually significant to supporting accents."
+        ),
+    )
     text_alignment: TextAlignment = "not_available"
     text_mismatches: list[str] = Field(default_factory=list, max_length=8)
     message: str | None = None

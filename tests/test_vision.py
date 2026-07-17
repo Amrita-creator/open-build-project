@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import httpx
+from PIL import Image, ImageDraw
 
 from inspo_mcp.models.source import SourceRecord, SourceStatus, utc_now
 from inspo_mcp.repositories.vision_analyses import VisionAnalysisRepository
@@ -18,6 +19,7 @@ from inspo_mcp.schemas.vision_analysis import ScreenshotVisionAnalysis
 from inspo_mcp.services.vision import (
     OllamaVisionAnalyzer,
     VisionAnalysisService,
+    extract_screenshot_palette,
     _parse_model_output,
     _vision_prompt,
 )
@@ -168,6 +170,23 @@ class VisionAnalysisServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Visible page regions in top-to-bottom order", prompt)
         self.assertIn("Component name: purpose and visible anatomy", prompt)
         self.assertIn("Return valid JSON only", prompt)
+
+    def test_extracts_a_local_palette_from_screenshot_pixels(self) -> None:
+        image_path = self._root / "palette.png"
+        image = Image.new("RGB", (100, 100), "#5865F2")
+        drawing = ImageDraw.Draw(image)
+        drawing.rectangle((0, 55, 100, 100), fill="#E2E5FF")
+        drawing.rectangle((0, 55, 22, 100), fill="#FFF200")
+        drawing.rectangle((22, 55, 35, 100), fill="#111111")
+        drawing.rectangle((35, 55, 45, 100), fill="#EC3D9A")
+        image.save(image_path)
+
+        palette = extract_screenshot_palette(image_path)
+
+        self.assertIn("#5865F2", palette)
+        self.assertIn("#E2E5FF", palette)
+        self.assertIn("#FFF200", palette)
+        self.assertIn("#EC3D9A", palette)
 
     def _write_screenshot(self, filename: str) -> Path:
         path = self._root / filename

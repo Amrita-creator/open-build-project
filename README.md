@@ -56,8 +56,9 @@ is intentionally conservative; screenshot-only sources are marked
 `awaiting_vision` rather than producing invented structure. Results are stored in
 SQLite for the next phase.
 
-M5 compares every available screenshot with M4's text evidence and persists
-visual style, layout, component, color, and text-mismatch findings in the
+M5 extracts a compact palette locally from every available screenshot, compares
+the screenshot with M4's text evidence, and persists visual style, layout,
+component, colour, and text-mismatch findings in the
 `vision_analyses` SQLite table. It uses a local Ollama vision model at
 `http://127.0.0.1:11434` only: no API key is needed and screenshot bytes never
 leave the developer's machine. The default model is `gemma4:e4b`; change it with
@@ -72,12 +73,15 @@ while records are still `pending`, call either `get_status` or
 `get_vision_analyses` with the run ID to resume that persisted M5 work. Completed
 M5 evidence feeds the M6 non-mock kit generator.
 
-M6 is the evidence-first kit generator. After at least one M5 record reaches
-`completed`, call `generate_reusable_kit` with the same `run_id`. It synthesizes
-M4/M5 patterns into the existing five artifacts—design direction, page blueprint,
-component cards, tokens, and build tasks—with `is_mock: false`. The generator is
-deterministic and deliberately uses only reusable patterns; it does not carry
-source wording, branding, logos, or exact layouts into the output.
+M6 is the evidence-first kit generator. Call `generate_reusable_kit` only after
+**every** requested M5 record reaches `completed`; partial evidence is rejected
+instead of being filled with a generic kit. When M5 times out or is unavailable,
+`get_status` returns an explicit retry action and `retry_vision_analysis` queues
+only the incomplete sources again. M6 synthesizes M4/M5 patterns into the five
+artifacts—design direction, page blueprint, component cards, tokens, and build
+tasks—with `is_mock: false`. Finance goals receive finance-specific components
+and page sections; all output remains original and does not carry source wording,
+branding, logos, or exact layouts into the result.
 
 M7 makes the workflow safe to poll. `get_status` returns durable lifecycle
 progress, capture/extraction/vision state for each source, warnings, and the
@@ -186,7 +190,7 @@ the analysis records report `completed`.
 
 ## Generate an M6 reusable kit
 
-After `get_vision_analyses` reports at least one `completed` result, call
+After `get_status` confirms that every requested M5 result is `completed`, call
 `generate_reusable_kit` in Inspector:
 
 ```json
@@ -195,9 +199,10 @@ After `get_vision_analyses` reports at least one `completed` result, call
 }
 ```
 
-The returned result has `"is_mock": false`. If every M5 result is still
-`pending`, wait and poll again; if every result failed, resolve the M5 error
-before generating the kit.
+The returned result has `"is_mock": false`. If M5 is still `pending`, wait and
+poll again. If `get_status` says visual evidence needs retry, resolve the local
+Ollama error if needed, call `retry_vision_analysis`, then wait for all sources
+to complete before generating the kit.
 
 ## Check M7 progress and retrieve a saved kit
 

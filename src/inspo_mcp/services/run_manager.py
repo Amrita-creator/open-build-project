@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from inspo_mcp.models.run import RunRecord, RunStatus
@@ -99,6 +100,51 @@ class RunManager:
             analysis.status == "pending"
             for analysis in self._vision_repository.list_for_run(run_id)
         )
+
+    def retry_vision_analysis(
+        self,
+        run_id: str,
+        source_urls: Sequence[str] = (),
+    ) -> tuple[ScreenshotVisionAnalysis, ...]:
+        """Queue failed or unavailable M5 sources again without discarding completed evidence."""
+
+        if (
+            self._vision_service is None
+            or self._source_repository is None
+            or self._site_analysis_repository is None
+            or self._vision_repository is None
+        ):
+            raise RuntimeError("M5 retry requires the configured source and vision repositories.")
+        run = self._repository.get(run_id)
+        analyses_by_url = {
+            analysis.source_url: analysis for analysis in self._vision_repository.list_for_run(run_id)
+        }
+        requested_urls = tuple(source_urls) or tuple(
+            source_url
+            for source_url in run.inspiration_urls
+            if analyses_by_url.get(source_url) is None
+            or analyses_by_url[source_url].status != "completed"
+        )
+        unknown_urls = set(requested_urls) - set(run.inspiration_urls)
+        if unknown_urls:
+            raise ValueError("Retry sources must belong to the original inspiration-kit run.")
+        if not requested_urls:
+            raise ValueError("All requested screenshot analyses are already complete.")
+
+        sources_by_url = {
+            source.source_url: source for source in self._source_repository.list_for_run(run_id)
+        }
+        missing_sources = [source_url for source_url in requested_urls if source_url not in sources_by_url]
+        if missing_sources:
+            raise ValueError("Retry sources are missing their durable screenshot evidence.")
+        sources = tuple(sources_by_url[source_url] for source_url in requested_urls)
+        pending = self._vision_service.mark_pending(sources)
+        self._deferred_vision_work[run_id] = DeferredVisionWork(
+            sources=sources,
+            text_analyses=self._site_analysis_repository.list_for_run(run_id),
+        )
+        self._repository.update(run.with_status(RunStatus.ANALYZING))
+        return pending
 
     async def create_captured_mock_kit(
         self,

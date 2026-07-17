@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from inspo_mcp.models.run import RunRecord, RunStatus, utc_now
 from inspo_mcp.schemas.site_analysis import (
@@ -11,7 +12,10 @@ from inspo_mcp.schemas.site_analysis import (
     SiteStructureAnalysis,
 )
 from inspo_mcp.schemas.vision_analysis import ScreenshotVisionAnalysis
-from inspo_mcp.services.kit_generator import EvidenceKitGenerator, EvidenceNotReadyError
+from inspo_mcp.services.kit_generator import (
+    EvidenceIncompleteError,
+    EvidenceKitGenerator,
+)
 
 
 class EvidenceKitGeneratorTests(unittest.TestCase):
@@ -31,7 +35,7 @@ class EvidenceKitGeneratorTests(unittest.TestCase):
         kit = self.generator.generate(
             self.run,
             (_structure(self.run.run_id),),
-            (_vision(self.run.run_id),),
+            (_vision(self.run.run_id), _vision(self.run.run_id, source_url="user-screenshot://two")),
         )
 
         self.assertFalse(kit.is_mock)
@@ -43,21 +47,47 @@ class EvidenceKitGeneratorTests(unittest.TestCase):
         self.assertTrue(kit.page_blueprint.sections)
         self.assertTrue(kit.build_tasks)
 
-    def test_requires_at_least_one_completed_visual_analysis(self) -> None:
+    def test_requires_every_requested_visual_analysis_to_complete(self) -> None:
         pending = _vision(self.run.run_id).model_copy(update={"status": "pending"})
 
-        with self.assertRaises(EvidenceNotReadyError):
+        with self.assertRaises(EvidenceIncompleteError) as error:
             self.generator.generate(self.run, (), (pending,))
+        self.assertEqual(error.exception.missing_sources, self.run.inspiration_urls)
 
-    def test_surfaces_failed_source_as_a_warning_without_discarding_completed_evidence(self) -> None:
+    def test_blocks_a_final_kit_when_one_source_failed(self) -> None:
         failed = _vision(self.run.run_id).model_copy(
-            update={"source_url": "user-screenshot://failed", "status": "failed", "message": "Timed out."}
+            update={"source_url": "user-screenshot://two", "status": "failed", "message": "Timed out."}
         )
 
-        kit = self.generator.generate(self.run, (), (_vision(self.run.run_id), failed))
+        with self.assertRaises(EvidenceIncompleteError) as error:
+            self.generator.generate(self.run, (), (_vision(self.run.run_id), failed))
+        self.assertEqual(error.exception.missing_sources, ("user-screenshot://two",))
 
-        self.assertEqual(len(kit.warnings), 1)
-        self.assertEqual(kit.warnings[0].message, "Timed out.")
+    def test_finance_goal_generates_palette_derived_finance_components(self) -> None:
+        finance_run = replace(
+            self.run,
+            project_goal="Build a personal finance landing page for savings and budgeting.",
+        )
+        first = _vision(
+            finance_run.run_id,
+            color_palette=["#5865F2", "#E2E5FF", "#111111", "#FFF200", "#EC3D9A"],
+        )
+        second = _vision(
+            finance_run.run_id,
+            source_url="user-screenshot://two",
+            color_palette=["#E2E5FF", "#5865F2", "#111111", "#EC3D9A", "#FFF200"],
+        )
+
+        kit = self.generator.generate(finance_run, (), (first, second))
+
+        component_names = [component.name for component in kit.component_cards]
+        self.assertIn("SplitAccountCard", component_names)
+        self.assertIn("FinanceDashboardPreview", component_names)
+        self.assertIn("FAQAccordion", component_names)
+        self.assertEqual(kit.design_tokens.colors["background"], "#5865F2")
+        self.assertEqual(kit.design_tokens.colors["surface"], "#E2E5FF")
+        self.assertEqual(kit.design_tokens.colors["accent"], "#FFF200")
+        self.assertEqual(kit.design_tokens.radius["button"], "999px")
 
 
 def _structure(run_id: str) -> SiteStructureAnalysis:
@@ -83,16 +113,22 @@ def _structure(run_id: str) -> SiteStructureAnalysis:
     )
 
 
-def _vision(run_id: str) -> ScreenshotVisionAnalysis:
+def _vision(
+    run_id: str,
+    *,
+    source_url: str = "user-screenshot://one",
+    color_palette: list[str] | None = None,
+) -> ScreenshotVisionAnalysis:
     return ScreenshotVisionAnalysis(
         run_id=run_id,
-        source_url="user-screenshot://one",
+        source_url=source_url,
         status="completed",
         summary="An original visual direction.",
-        visual_style=["Vibrant purple-to-blue gradient", "Large display typography"],
+        visual_style=["Vibrant purple-to-blue gradient", "Large display typography", "Rounded pill controls"],
         layout_patterns=["Compact navigation", "Media-forward hero", "Feature card row"],
         component_patterns=["Search control", "Category tile", "Product card"],
         color_direction=["Purple accent over a light surface"],
+        color_palette=color_palette or [],
         text_alignment="not_available",
         analyzed_at=utc_now(),
     )

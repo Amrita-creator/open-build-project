@@ -26,6 +26,13 @@ class ServerToolSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool.parameters["properties"]["run_id"]["type"], "string")
         self.assertIn("pending", tool.description.lower())
 
+    async def test_exposes_a_retry_tool_for_incomplete_m5_results(self) -> None:
+        tool = await mcp.get_tool("retry_vision_analysis")
+
+        self.assertEqual(tool.parameters["required"], ["run_id"])
+        self.assertEqual(tool.parameters["properties"]["source_urls"]["type"], "array")
+        self.assertIn("retry", tool.description.lower())
+
     async def test_exposes_m6_evidence_kit_generation(self) -> None:
         tool = await mcp.get_tool("generate_reusable_kit")
 

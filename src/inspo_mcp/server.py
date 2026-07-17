@@ -61,8 +61,9 @@ mcp = FastMCP(
         "Turn two or three UI inspiration screenshots and/or public URLs into an "
         "original, reusable design starter kit. Screenshots are primary visual "
         "evidence; URLs are optional safe enrichment. Start with create_inspiration_kit. "
-        "After M5 completes, call generate_reusable_kit with the run ID to create a "
-        "non-mock kit from the persisted evidence."
+        "Poll get_status after M5. Call generate_reusable_kit only when every requested "
+        "screenshot has completed M5; if status says retry is needed, call "
+        "retry_vision_analysis instead. Never invent a final kit from partial visual evidence."
     ),
 )
 register_user_workflow_prompts(mcp)
@@ -314,6 +315,35 @@ async def get_vision_analyses(
     analyses = list(vision_repository.list_for_run(run_id))
     await ctx.info(f"Retrieved {len(analyses)} M5 vision result(s) for run {run_id}.")
     return [mask_vision_analysis(run, analysis) for analysis in analyses]
+
+
+@mcp.tool
+@traced_tool("retry_vision_analysis")
+async def retry_vision_analysis(
+    run_id: Annotated[
+        str,
+        Field(
+            min_length=1,
+            description="Run ID whose incomplete M5 screenshot analyses should be queued again.",
+        ),
+    ],
+    ctx: Context,
+    source_urls: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Optional source identifiers from get_status. Leave empty to retry every source "
+                "that has not completed M5 analysis."
+            )
+        ),
+    ] = [],
+) -> RunStatusReport:
+    """Retry incomplete M5 screenshot analyses before generating a final reusable kit."""
+
+    queued = run_manager.retry_vision_analysis(run_id, source_urls)
+    _schedule_background_vision(run_id)
+    await ctx.info(f"Queued {len(queued)} M5 screenshot analysis retry or retries for run {run_id}.")
+    return mask_run_status(run_manager.get_run(run_id), _status_report(run_id))
 
 
 def _status_report(run_id: str) -> RunStatusReport:

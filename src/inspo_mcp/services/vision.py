@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol, Sequence
 
 import httpx
+from PIL import Image
 
 from inspo_mcp.models.source import SourceRecord, utc_now
 from inspo_mcp.repositories.vision_analyses import VisionAnalysisRepository
@@ -119,8 +120,9 @@ class OllamaVisionAnalyzer:
                 status="not_applicable",
                 message="No screenshot evidence is available for M5 vision analysis.",
             )
+        color_palette = _safe_extract_palette(Path(source.screenshot_path))
         try:
-            return await self._analyze_local(source, text_analysis)
+            return await self._analyze_local(source, text_analysis, color_palette=color_palette)
         except httpx.ConnectError:
             return _base_analysis(
                 source,
@@ -129,12 +131,14 @@ class OllamaVisionAnalyzer:
                     "Local Ollama is not running at 127.0.0.1:11434. Install/start Ollama and "
                     f"run 'ollama pull {self._model}'."
                 ),
+                color_palette=color_palette,
             )
         except httpx.TimeoutException:
             return _base_analysis(
                 source,
                 status="failed",
                 message="Local Ollama vision analysis timed out.",
+                color_palette=color_palette,
             )
         except httpx.HTTPStatusError as error:
             return _base_analysis(
@@ -144,18 +148,22 @@ class OllamaVisionAnalyzer:
                     f"Local Ollama could not use model '{self._model}' (HTTP "
                     f"{error.response.status_code}). Run 'ollama pull {self._model}' and retry."
                 ),
+                color_palette=color_palette,
             )
         except Exception as error:
             return _base_analysis(
                 source,
                 status="failed",
                 message=f"Local M5 vision analysis failed: {type(error).__name__}: {error}",
+                color_palette=color_palette,
             )
 
     async def _analyze_local(
         self,
         source: SourceRecord,
         text_analysis: SiteStructureAnalysis | None,
+        *,
+        color_palette: Sequence[str],
     ) -> ScreenshotVisionAnalysis:
         image_path = Path(source.screenshot_path or "")
         image_bytes = image_path.read_bytes()
@@ -184,7 +192,7 @@ class OllamaVisionAnalyzer:
         output = payload.get("response")
         if not isinstance(output, str):
             raise ValueError("Local Ollama response did not include generated text.")
-        return _parse_model_output(source, output)
+        return _parse_model_output(source, output, color_palette=color_palette)
 
 
 def configured_vision_analyzer() -> VisionAnalyzer:
@@ -225,7 +233,9 @@ def _vision_prompt(text_analysis: SiteStructureAnalysis | None) -> str:
         "navigation bar, search control, hero banner, category tile, product card, or primary CTA.\n"
         "6. Design language: color relationships, typography scale and weight, borders, radius, shadows, "
         "dividers, spacing rhythm, imagery treatment, and button treatment.\n"
-        "7. Screenshot-to-text comparison: flag a mismatch only when captured text clearly indicates a "
+        "7. Name visible visual patterns precisely when present, including pill buttons, oversized display "
+        "type, split-choice cards, dashboard action rows, and large-radius panels.\n"
+        "8. Screenshot-to-text comparison: flag a mismatch only when captured text clearly indicates a "
         "blocked, unsupported, or unrelated page.\n\n"
         "Captured text structure:\n"
         + text_context
@@ -242,7 +252,12 @@ def _vision_prompt(text_analysis: SiteStructureAnalysis | None) -> str:
     )
 
 
-def _parse_model_output(source: SourceRecord, output_text: str) -> ScreenshotVisionAnalysis:
+def _parse_model_output(
+    source: SourceRecord,
+    output_text: str,
+    *,
+    color_palette: Sequence[str] = (),
+) -> ScreenshotVisionAnalysis:
     """Convert a model's JSON-only reply into bounded, durable M5 evidence."""
 
     cleaned = output_text.strip()
@@ -266,6 +281,7 @@ def _parse_model_output(source: SourceRecord, output_text: str) -> ScreenshotVis
         layout_patterns=_string_list(payload.get("layout_patterns"), limit=12),
         component_patterns=_string_list(payload.get("component_patterns"), limit=12),
         color_direction=_string_list(payload.get("color_direction"), limit=8),
+        color_palette=_hex_color_list(color_palette, limit=8),
         text_alignment=alignment,
         text_mismatches=_string_list(payload.get("text_mismatches"), limit=8),
         analyzed_at=utc_now(),
@@ -277,6 +293,7 @@ def _base_analysis(
     *,
     status: str,
     message: str,
+    color_palette: Sequence[str] = (),
 ) -> ScreenshotVisionAnalysis:
     return ScreenshotVisionAnalysis(
         run_id=source.run_id,
@@ -284,6 +301,7 @@ def _base_analysis(
         source_content_hash=source.content_hash,
         status=status,  # type: ignore[arg-type]
         message=message,
+        color_palette=_hex_color_list(color_palette, limit=8),
         analyzed_at=utc_now(),
     )
 
@@ -296,6 +314,89 @@ def _string_list(value: object, *, limit: int) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item.strip() for item in value if isinstance(item, str) and item.strip()][:limit]
+
+
+def extract_screenshot_palette(image_path: Path, *, max_colors: int = 6) -> list[str]:
+    """Return a compact, locally extracted palette without sending pixels anywhere else."""
+
+    with Image.open(image_path) as opened_image:
+        image = opened_image.convert("RGB")
+    image.thumbnail((240, 240))
+    quantized = image.quantize(colors=32, method=Image.Quantize.MEDIANCUT)
+    palette = quantized.getpalette()
+    color_counts = quantized.getcolors(maxcolors=32) or []
+    if palette is None or not color_counts:
+        return []
+
+    total_pixels = sum(count for count, _ in color_counts)
+    candidates = sorted(
+        (
+            (count, (palette[index * 3], palette[index * 3 + 1], palette[index * 3 + 2]))
+            for count, index in color_counts
+        ),
+        reverse=True,
+    )
+    selected: list[tuple[int, int, int]] = []
+
+    for _, color in candidates:
+        if _is_visually_distinct(color, selected):
+            selected.append(color)
+        if len(selected) >= min(3, max_colors):
+            break
+
+    accent_candidates = sorted(
+        candidates,
+        key=lambda candidate: (
+            _saturation(candidate[1]) * 0.12 + candidate[0] / max(total_pixels, 1),
+            candidate[0],
+        ),
+        reverse=True,
+    )
+    for count, color in accent_candidates:
+        if count / max(total_pixels, 1) < 0.002:
+            continue
+        if _is_visually_distinct(color, selected):
+            selected.append(color)
+        if len(selected) >= max_colors:
+            break
+
+    return [_rgb_to_hex(color) for color in selected]
+
+
+def _safe_extract_palette(image_path: Path) -> list[str]:
+    """Keep local colour extraction helpful but non-blocking for unsupported files."""
+
+    try:
+        return extract_screenshot_palette(image_path)
+    except (OSError, ValueError):
+        return []
+
+
+def _is_visually_distinct(
+    candidate: tuple[int, int, int],
+    selected: Sequence[tuple[int, int, int]],
+) -> bool:
+    return all(sum((left - right) ** 2 for left, right in zip(candidate, color)) ** 0.5 >= 42 for color in selected)
+
+
+def _saturation(color: tuple[int, int, int]) -> float:
+    maximum = max(color)
+    return 0.0 if maximum == 0 else (maximum - min(color)) / maximum
+
+
+def _rgb_to_hex(color: tuple[int, int, int]) -> str:
+    return "#" + "".join(f"{channel:02X}" for channel in color)
+
+
+def _hex_color_list(values: Sequence[str], *, limit: int) -> list[str]:
+    colors: list[str] = []
+    for value in values:
+        normalized = value.strip().upper()
+        if len(normalized) == 7 and normalized.startswith("#") and all(
+            character in "0123456789ABCDEF" for character in normalized[1:]
+        ) and normalized not in colors:
+            colors.append(normalized)
+    return colors[:limit]
 
 
 def _require_local_ollama_url(value: str) -> None:
