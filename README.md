@@ -129,12 +129,15 @@ authorization are added.
 
 The repository includes a Railway-ready configuration in `railway.toml` and a
 complete setup guide at [deployment/railway.md](deployment/railway.md). The
-Docker image includes two self-authored demo screenshot inputs at
-`/app/demo/aurora-landing.png` and `/app/demo/ops-dashboard.png`, so a judge
-can test a hosted server without providing Windows file paths. The guide covers
-the required production variables, persistent volume, temporary bearer token,
-and exact MCP request. A hosted server still needs a local-vision sidecar or a
-hosted vision provider before M5/M6 can run end-to-end.
+Docker image includes two self-authored demo screenshots. The
+`run_hosted_demo` tool uses their precomputed, curated visual evidence to
+return a completed non-mock kit immediately—without claiming to run Ollama or
+analyze judge-provided sources. It lets judges test the hosted MCP service,
+persistence, retrieval, and component-code generation without Windows file
+paths or a hosted model. The guide covers the production variables, temporary
+bearer token, and exact judge request. The live `create_inspiration_kit` M5/M6
+flow still needs a local-vision sidecar or approved hosted vision provider when
+deployed remotely.
 
 ## OpenAI Build Week — Developer Tools submission
 

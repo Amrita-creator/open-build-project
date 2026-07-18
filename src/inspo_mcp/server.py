@@ -32,6 +32,7 @@ from inspo_mcp.schemas import (
 )
 from inspo_mcp.services.capture import CaptureService, CaptureSettings
 from inspo_mcp.services.extract import StructureExtractor
+from inspo_mcp.services.hosted_demo import HostedJudgeDemoService
 from inspo_mcp.services.kit_generator import EvidenceKitGenerator
 from inspo_mcp.services.privacy import (
     mask_component_generation,
@@ -63,7 +64,9 @@ mcp = FastMCP(
         "evidence; URLs are optional safe enrichment. Start with create_inspiration_kit. "
         "Poll get_status after M5. Call generate_reusable_kit only when every requested "
         "screenshot has completed M5; if status says retry is needed, call "
-        "retry_vision_analysis instead. Never invent a final kit from partial visual evidence."
+        "retry_vision_analysis instead. Never invent a final kit from partial visual evidence. "
+        "For a hosted judge check that cannot run Ollama, use run_hosted_demo: it uses "
+        "precomputed evidence from bundled self-authored screenshots and must be described as a demo."
     ),
 )
 register_user_workflow_prompts(mcp)
@@ -147,8 +150,9 @@ vision_service = VisionAnalysisService(
     configured_vision_analyzer(),
 )
 kit_repository = KitRepository(database)
+run_repository = RunRepository(database)
 run_manager = RunManager(
-    RunRepository(database),
+    run_repository,
     structure_extractor,
     vision_service,
     source_repository=source_repository,
@@ -156,6 +160,13 @@ run_manager = RunManager(
     vision_repository=vision_repository,
 )
 kit_generator = EvidenceKitGenerator()
+hosted_judge_demo = HostedJudgeDemoService(
+    run_repository,
+    source_repository,
+    vision_repository,
+    kit_repository,
+    kit_generator,
+)
 background_vision_tasks: dict[str, asyncio.Task[None]] = {}
 
 
@@ -292,6 +303,57 @@ async def create_inspiration_kit(
     )
     await ctx.report_progress(progress=100, total=100)
 
+    return mask_kit(run_manager.get_run(kit.run_id), kit)
+
+
+@mcp.tool
+@traced_tool("run_hosted_demo")
+async def run_hosted_demo(
+    ctx: Context,
+    project_goal: Annotated[
+        str,
+        Field(
+            min_length=10,
+            max_length=500,
+            description=(
+                "The product goal to apply to the bundled self-authored judge-demo evidence. "
+                "This tool does not inspect user-provided sources."
+            ),
+        ),
+    ] = "Build a calm operations workspace for a product team.",
+    framework: Framework = "nextjs-tailwind",
+    privacy_mode: bool = True,
+    retention_days: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=90,
+            description="Keep this demo run for this many days (1-90; default 7).",
+        ),
+    ] = 7,
+) -> InspirationKit:
+    """Return a completed kit from transparent, precomputed self-authored demo evidence.
+
+    Use this only to verify the hosted MCP service when a hosted Ollama model is
+    unavailable. It never analyzes caller screenshots or URLs.
+    """
+
+    _cleanup_expired_runs()
+    reject_request_secrets(project_goal, [])
+    safe_goal = redact_text(project_goal)
+    if safe_goal.counts:
+        await ctx.info("Sensitive text was redacted from the product goal before processing.")
+    await ctx.info(
+        "Creating a completed hosted demo from precomputed evidence for two self-authored "
+        "screenshots; Ollama will not be called."
+    )
+    kit = hosted_judge_demo.create(
+        project_goal=safe_goal.text,
+        framework=framework,
+        privacy_mode=privacy_mode,
+        retention_days=retention_days,
+    )
+    await ctx.info(f"Hosted demo run {kit.run_id} is complete and stored.")
     return mask_kit(run_manager.get_run(kit.run_id), kit)
 
 

@@ -65,16 +65,18 @@ next actions instead of silently failing.
 I used Codex to plan the milestone architecture, implement the FastMCP tools,
 iterate on the SQLite pipeline, add tests, harden capture and privacy behavior,
 prepare Docker deployment, and create the judge-demo flow. The repository has
-73 automated tests covering the capture pipeline, persistence, retrieval,
-component generation, production configuration, privacy, and demo packaging.
+80 automated tests covering the capture pipeline, persistence, retrieval,
+component generation, production configuration, privacy, and hosted-demo flow.
 
 ## Judge quick start
 
 The README includes local installation, Docker instructions, supported-platform
 notes, and a Railway deployment guide. The Docker image contains two
-self-authored demo screenshot inputs so judges can call the MCP tool without
-needing files from their own computer. For a hosted demo, use the temporary
-MCP URL and bearer token supplied in the Devpost judge-instructions field.
+self-authored demo screenshots. For a hosted demo, `run_hosted_demo` uses
+precomputed, disclosed evidence from those assets, so judges can test the MCP
+workflow without providing local files or waiting for a hosted Ollama model.
+Use the temporary MCP URL and bearer token supplied in the Devpost
+judge-instructions field.
 
 ## Required Devpost fields
 
@@ -98,10 +100,11 @@ Local setup: follow `README.md` under **Run locally**, then start Inspector with
 `fastmcp dev src/inspo_mcp/server.py:mcp`.
 
 Hosted judge test: connect to the supplied HTTPS MCP endpoint using
-`Authorization: Bearer <temporary-demo-token>`. Call
-`create_inspiration_kit` with the server-side demo paths
-`/app/demo/aurora-landing.png` and `/app/demo/ops-dashboard.png`; the complete
-JSON request is in `deployment/railway.md`.
+`Authorization: Bearer <temporary-demo-token>`. Call `run_hosted_demo`, then
+use its `demo_...` run ID with `get_kit` and `generate_component_code`. This
+tool transparently uses precomputed evidence from self-authored bundled assets;
+it does not claim to analyze judge-provided images or call Ollama. The complete
+request is in `deployment/railway.md`.
 
 ## Before pressing Submit
 

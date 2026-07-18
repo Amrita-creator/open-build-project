@@ -53,7 +53,9 @@ Show `/healthz`, the Docker/hosted endpoint, or the Railway guide.
 
 > The project ships with Docker, bearer-token authentication, structured logs,
 > OpenTelemetry support, health checks, and self-authored demo screenshots so
-> judges can test the developer tool without rebuilding it from scratch.
+> judges can test the developer tool without rebuilding it from scratch. The
+> hosted `run_hosted_demo` path is transparent: it uses precomputed evidence
+> from those self-authored screenshots and does not claim to run Ollama.
 
 ## 2:35–3:00 — Codex and GPT-5.6 disclosure
 

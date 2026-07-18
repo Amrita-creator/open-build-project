@@ -39,6 +39,17 @@ class ServerToolSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool.parameters["required"], ["run_id"])
         self.assertEqual(tool.parameters["properties"]["run_id"]["type"], "string")
 
+    async def test_exposes_a_transparent_hosted_judge_demo_tool(self) -> None:
+        tool = await mcp.get_tool("run_hosted_demo")
+
+        self.assertEqual(tool.parameters.get("required", []), [])
+        self.assertEqual(
+            tool.parameters["properties"]["project_goal"]["default"],
+            "Build a calm operations workspace for a product team.",
+        )
+        self.assertIn("precomputed", tool.description.lower())
+        self.assertIn("does not inspect", tool.parameters["properties"]["project_goal"]["description"].lower())
+
     async def test_exposes_m7_durable_retrieval_tools(self) -> None:
         status_tool = await mcp.get_tool("get_status")
         kit_tool = await mcp.get_tool("get_kit")

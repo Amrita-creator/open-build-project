@@ -9,15 +9,18 @@ is `https://<generated-domain>/healthz`.
 - The production Docker image and Streamable HTTP MCP endpoint.
 - Bearer-token authentication.
 - A persistent SQLite database and managed capture-artifact directory.
-- Built-in, self-authored demo screenshot inputs at:
+- Built-in, self-authored demo screenshots used by `run_hosted_demo`:
   - `/app/demo/aurora-landing.png`
   - `/app/demo/ops-dashboard.png`
 - MCP tools, prompts, privacy guidance, health probes, and JSON logs.
 
-The deployment does not automatically include an Ollama model. M3, M4, M7,
-M8, M9, M10, and M11 remain usable, but M5 visual analysis and the evidence
-derived M6 kit require a separately deployed local-vision sidecar or a future
-approved hosted vision provider.
+The deployment does not automatically include an Ollama model. Live M5 visual
+analysis of caller-provided screenshots and the normal evidence-derived M6 kit
+therefore require a separately deployed local-vision sidecar or a future
+approved hosted vision provider. `run_hosted_demo` is deliberately different:
+it returns a completed, stored non-mock kit from precomputed visual evidence
+for the two self-authored bundled screenshots. It is the reliable judge check,
+and it clearly discloses that no model is called.
 
 ## Deploy from GitHub
 
@@ -80,25 +83,27 @@ First verify the public service:
 Invoke-RestMethod https://<generated-domain>/healthz
 ```
 
-Then call `create_inspiration_kit` with the server-side bundled images:
+Then call `run_hosted_demo`:
 
 ```json
 {
   "project_goal": "Build a calm operations workspace for product teams that helps them identify priorities and resolve incidents. Primary action: Review priorities.",
   "framework": "nextjs-tailwind",
-  "inspiration_urls": [],
-  "inspiration_screenshots": [
-    "/app/demo/aurora-landing.png",
-    "/app/demo/ops-dashboard.png"
-  ],
   "privacy_mode": true,
   "retention_days": 7
 }
 ```
 
-The paths above exist inside the deployed container. A remote MCP server cannot
-read paths such as `C:/Users/Judge/Pictures/example.png` from a judge's own
-computer. Use a future upload flow for arbitrary judge screenshots.
+The tool returns a `demo_...` run ID and a completed reusable kit immediately.
+To verify the durable workflow, call `get_kit` with that run ID, then call
+`generate_component_code` with the same run ID and one returned component name.
+
+`run_hosted_demo` does not accept or analyze judge-provided screenshots or URLs;
+it is a transparent hosted demonstration of the MCP service, persistence, kit
+synthesis, retrieval, and code-generation workflow. The live local
+`create_inspiration_kit` → M5 Ollama flow is demonstrated separately in the
+video. A future upload flow is needed before a remote MCP service can analyze
+arbitrary images from a judge's computer.
 
 After the hackathon, rotate `INSPO_MCP_AUTH_TOKEN` or remove the service and
 volume. The current bearer-token model is single-tenant and intended only for
