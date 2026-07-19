@@ -1,5 +1,6 @@
 # Virtual environments and secrets
 .venv*/
+/test-scr/
 .env
 
 # Local application data

@@ -1,25 +1,46 @@
 # InspoMCP
 
-An MCP server that turns two or three UI inspiration screenshots and/or public
-URLs into a reusable, build-ready design starter kit. It has no frontend:
-connect it to an MCP client such as Codex once the local server is running.
+InspoMCP is a privacy-aware MCP developer tool that turns two or three UI
+inspiration screenshots and/or public URLs into an original, build-ready UI kit.
+It has no frontend: connect it to an MCP client such as Codex or FastMCP
+Inspector.
 
-## Current status
+## What it delivers
 
-The primary `create_inspiration_kit` tool is wired up with typed Pydantic
-contracts and a deterministic mock response. It already returns the five product
-artifacts:
+- Design direction and an original page blueprint
+- Reusable component cards with accessibility and responsive guidance
+- Design tokens and implementation tasks
+- Framework-specific starter code for a saved component
 
-1. design direction
-2. page blueprint
-3. reusable component cards
-4. design tokens
-5. implementation tasks
+The full local workflow is: `create_inspiration_kit` → poll `get_status` while
+M5 analyzes screenshots with local Ollama → `generate_reusable_kit` → `get_kit`
+→ `generate_component_code`.
 
-M1 adds a local SQLite run record behind the existing tool. Each successful call
-now receives a persisted run ID and is stored as `completed`, while the output
-remains a mock kit. The database is created at `data/inspo_mcp.db` by default.
-Set `INSPO_MCP_DATABASE_PATH` to use another location.
+## Self-authored demo references
+
+These bundled screenshots are used only as transparent, self-authored evidence
+for the hosted judge demo. InspoMCP extracts reusable patterns, not source
+branding, copy, or exact layouts.
+
+![Aurora landing-page reference](demo/aurora-landing.png)
+
+![Northstar operations-dashboard reference](demo/ops-dashboard.png)
+
+## Judge demo in one minute
+
+The hosted Railway service provides `run_hosted_demo` for a reliable judge
+check without a hosted Ollama model. It immediately returns a completed,
+non-mock kit from disclosed precomputed evidence for the two screenshots above.
+Then call `get_kit` with the returned `demo_...` run ID and
+`generate_component_code` with one returned component name. See
+[deployment/railway.md](deployment/railway.md) for the authenticated connection
+details.
+
+## Capabilities and technical notes
+
+Every request creates a durable SQLite run record. The database is created at
+`data/inspo_mcp.db` by default; set `INSPO_MCP_DATABASE_PATH` to use another
+location.
 
 M2 validates every submitted URL before a run is created. URLs are optional;
 screenshots can be supplied without a URL. URLs allow only public HTTP/HTTPS
