@@ -36,6 +36,20 @@ Then call `get_kit` with the returned `demo_...` run ID and
 [deployment/railway.md](deployment/railway.md) for the authenticated connection
 details.
 
+## Hosted demo proof
+
+`run_hosted_demo` is visible as a first-class MCP tool with a product-goal and
+framework input. This hosted verification path is intentionally transparent:
+it uses self-authored bundled evidence and does not claim to run a remote
+vision model.
+
+![FastMCP Inspector showing the run_hosted_demo tool](docs/screenshots/hosted-demo-input.png)
+
+The completed response returns a durable `demo_...` run ID and an original
+design direction derived from that disclosed evidence.
+
+![Successful run_hosted_demo result in FastMCP Inspector](docs/screenshots/hosted-demo-result.png)
+
 ## Capabilities and technical notes
 
 Every request creates a durable SQLite run record. The database is created at
