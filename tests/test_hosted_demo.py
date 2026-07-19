@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import unittest
+import os
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 from inspo_mcp.models.run import RunStatus
 from inspo_mcp.repositories.kits import KitRepository
@@ -90,6 +92,29 @@ class HostedJudgeDemoServiceTests(unittest.TestCase):
         self.assertEqual(report.progress, 100)
         self.assertTrue(report.kit_ready)
         self.assertTrue(any(card.name == "FinanceHero" for card in kit.component_cards))
+
+    def test_default_demo_root_uses_the_configured_docker_asset_directory(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"INSPO_MCP_DEMO_ROOT": str(PROJECT_ROOT / "demo")},
+            clear=False,
+        ):
+            service = HostedJudgeDemoService(
+                self.runs,
+                self.sources,
+                self.vision,
+                self.kits,
+                EvidenceKitGenerator(),
+            )
+
+        kit = service.create(
+            project_goal="Build a calm finance workspace for small business owners.",
+            framework="nextjs-tailwind",
+            privacy_mode=True,
+            retention_days=7,
+        )
+
+        self.assertTrue(kit.run_id.startswith("demo_"))
 
 
 if __name__ == "__main__":

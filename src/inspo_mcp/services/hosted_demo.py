@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -108,6 +109,28 @@ _DEMO_ASSETS = (
 )
 
 
+def _default_demo_root() -> Path:
+    """Locate bundled demo screenshots in source and installed Docker builds."""
+
+    configured_root = os.environ.get("INSPO_MCP_DEMO_ROOT")
+    candidates = (
+        Path(configured_root).expanduser() if configured_root else None,
+        Path.cwd() / "demo",
+        Path("/app/demo"),
+        Path(__file__).resolve().parents[3] / "demo",
+    )
+    for candidate in candidates:
+        if candidate is not None and all(
+            (candidate / asset.filename).is_file() for asset in _DEMO_ASSETS
+        ):
+            return candidate
+
+    searched = ", ".join(str(candidate) for candidate in candidates if candidate is not None)
+    raise FileNotFoundError(
+        "Bundled hosted-demo screenshots were not found. Searched: " + searched
+    )
+
+
 class HostedJudgeDemoService:
     """Create a durable, non-mock kit from bundled and disclosed demo evidence.
 
@@ -130,7 +153,7 @@ class HostedJudgeDemoService:
         self._vision_analyses = vision_analyses
         self._kits = kits
         self._kit_generator = kit_generator
-        self._demo_root = demo_root or Path(__file__).resolve().parents[3] / "demo"
+        self._demo_root = demo_root or _default_demo_root()
 
     def create(
         self,
