@@ -2,6 +2,7 @@
 name = "inspo-mcp"
 version = "0.1.0"
 description = "Turn UI inspiration URLs into reusable, build-ready design artifacts."
+license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp",
