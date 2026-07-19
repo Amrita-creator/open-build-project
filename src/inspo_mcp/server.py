@@ -481,7 +481,7 @@ async def get_kit(
     ],
     ctx: Context,
 ) -> KitLookup:
-    """Retrieve the durable M6 kit or an actionable partial-result response."""
+    """Retrieve durable M6 output; when ``state`` is ``ready``, the kit is in ``kit``."""
 
     run = run_manager.get_run(run_id)
     report = _status_report(run_id)

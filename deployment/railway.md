@@ -95,8 +95,25 @@ Then call `run_hosted_demo`:
 ```
 
 The tool returns a `demo_...` run ID and a completed reusable kit immediately.
-To verify the durable workflow, call `get_kit` with that run ID, then call
-`generate_component_code` with the same run ID and one returned component name.
+To verify the durable workflow, call `get_kit` with that run ID. Its response
+is an envelope: when `state` is `ready`, the reusable kit is in its `kit`
+field. Then call `generate_component_code` with the same run ID and a component
+name from `kit.component_cards`.
+
+### One-command verifier
+
+From a clone of this repository, use the installed project environment and set
+the URL plus raw bearer-token value only in the current shell:
+
+```powershell
+$env:INSPO_MCP_URL = "https://<generated-domain>/mcp"
+$env:INSPO_MCP_AUTH_TOKEN = Read-Host "Paste the temporary judge token"
+python scripts/verify_hosted_mcp.py
+```
+
+The verifier checks the three judge-relevant operations in sequence:
+`run_hosted_demo`, `get_kit`, and `generate_component_code`. It prints no
+token and exits with a non-zero status if any step fails.
 
 `run_hosted_demo` does not accept or analyze judge-provided screenshots or URLs;
 it is a transparent hosted demonstration of the MCP service, persistence, kit
