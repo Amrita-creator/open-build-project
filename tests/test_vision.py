@@ -122,6 +122,66 @@ class VisionAnalysisServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["format"], "json")  # type: ignore[index]
         self.assertFalse(body["stream"])  # type: ignore[index]
 
+    async def test_ollama_analyzer_retries_malformed_json_with_compact_prompt(self) -> None:
+        screenshot_path = self._write_screenshot("retry-reference.png")
+        source = _source("run_json_retry", screenshot_path)
+        requests: list[dict[str, object]] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(json.loads(request.content.decode("utf-8")))
+            if len(requests) == 1:
+                return httpx.Response(200, json={"response": '{"summary":"unterminated'})
+            return httpx.Response(
+                200,
+                json={
+                    "response": json.dumps(
+                        {
+                            "summary": "A compact, valid retry result.",
+                            "visual_style": ["clear hierarchy"],
+                            "layout_patterns": ["hero then cards"],
+                            "component_patterns": ["feature card"],
+                            "color_direction": ["dark neutral base"],
+                            "text_alignment": "aligned",
+                            "text_mismatches": [],
+                        }
+                    )
+                },
+            )
+
+        analyzer = OllamaVisionAnalyzer(
+            model="test-vision",
+            transport=httpx.MockTransport(handler),
+        )
+        analysis = await analyzer.analyze(source, None)
+
+        self.assertEqual(analysis.status, "completed")
+        self.assertEqual(analysis.summary, "A compact, valid retry result.")
+        self.assertEqual(len(requests), 2)
+        self.assertIn("previous response could not be parsed", requests[1]["prompt"])  # type: ignore[index]
+
+    def test_parser_ignores_non_json_text_around_a_valid_object(self) -> None:
+        source = _source("run_wrapped_json", self._write_screenshot("wrapped-json.png"))
+
+        analysis = _parse_model_output(
+            source,
+            "Here is the analysis:\n"
+            + json.dumps(
+                {
+                    "summary": "A valid wrapped object.",
+                    "visual_style": ["focused"],
+                    "layout_patterns": [],
+                    "component_patterns": [],
+                    "color_direction": [],
+                    "text_alignment": "not_available",
+                    "text_mismatches": [],
+                }
+            )
+            + "\nEnd of response.",
+        )
+
+        self.assertEqual(analysis.status, "completed")
+        self.assertEqual(analysis.summary, "A valid wrapped object.")
+
     async def test_missing_local_model_returns_a_setup_message(self) -> None:
         screenshot_path = self._write_screenshot("missing-model.png")
         source = _source("run_missing_model", screenshot_path)

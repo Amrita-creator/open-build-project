@@ -18,6 +18,11 @@ from inspo_mcp.schemas.site_analysis import SiteStructureAnalysis
 from inspo_mcp.schemas.vision_analysis import ScreenshotVisionAnalysis
 
 
+_INITIAL_JSON_OPTIONS = {"temperature": 0.1, "num_predict": 900}
+_COMPACT_RETRY_JSON_OPTIONS = {"temperature": 0.0, "num_predict": 500}
+_MAX_JSON_ATTEMPTS = 2
+
+
 class VisionAnalyzer(Protocol):
     """Analyze one persisted screenshot without knowing MCP or database details."""
 
@@ -172,27 +177,44 @@ class OllamaVisionAnalyzer:
                 f"Screenshot exceeds the M5 vision limit ({self._max_image_bytes} bytes)."
             )
         encoded_image = base64.b64encode(image_bytes).decode("ascii")
-        request = {
-            "model": self._model,
-            "prompt": _vision_prompt(text_analysis),
-            "images": [encoded_image],
-            "format": "json",
-            "stream": False,
-            "options": {"temperature": 0.1},
-        }
         async with httpx.AsyncClient(
             base_url=self._base_url,
             timeout=self._timeout_seconds,
             trust_env=False,
             transport=self._transport,
         ) as client:
-            response = await client.post("/api/generate", json=request)
-            response.raise_for_status()
-        payload = response.json()
-        output = payload.get("response")
-        if not isinstance(output, str):
-            raise ValueError("Local Ollama response did not include generated text.")
-        return _parse_model_output(source, output, color_palette=color_palette)
+            for attempt in range(_MAX_JSON_ATTEMPTS):
+                is_compact_retry = attempt > 0
+                request = {
+                    "model": self._model,
+                    "prompt": (
+                        _compact_json_retry_prompt(text_analysis)
+                        if is_compact_retry
+                        else _vision_prompt(text_analysis)
+                    ),
+                    "images": [encoded_image],
+                    "format": "json",
+                    "stream": False,
+                    "options": (
+                        _COMPACT_RETRY_JSON_OPTIONS
+                        if is_compact_retry
+                        else _INITIAL_JSON_OPTIONS
+                    ),
+                }
+                response = await client.post("/api/generate", json=request)
+                response.raise_for_status()
+                payload = response.json()
+                output = payload.get("response")
+                if not isinstance(output, str):
+                    raise ValueError("Local Ollama response did not include generated text.")
+                try:
+                    return _parse_model_output(source, output, color_palette=color_palette)
+                except (json.JSONDecodeError, ValueError) as error:
+                    if attempt + 1 == _MAX_JSON_ATTEMPTS:
+                        raise ValueError(
+                            "Local Ollama returned invalid JSON after a compact retry: "
+                            f"{error}"
+                        ) from error
 
 
 def configured_vision_analyzer() -> VisionAnalyzer:
@@ -204,11 +226,7 @@ def configured_vision_analyzer() -> VisionAnalyzer:
 def _vision_prompt(text_analysis: SiteStructureAnalysis | None) -> str:
     """Ask for precise, original UI observations rather than copied content."""
 
-    text_context = (
-        text_analysis.model_dump_json()
-        if text_analysis is not None and text_analysis.status == "extracted"
-        else "No reliable text structure was extracted."
-    )
+    text_context = _text_context(text_analysis)
     return (
         "You are a senior product designer performing a precise visual analysis of one UI screenshot. "
         "Extract reusable, original design patterns for a developer building a new interface. Analyze "
@@ -252,6 +270,34 @@ def _vision_prompt(text_analysis: SiteStructureAnalysis | None) -> str:
     )
 
 
+def _compact_json_retry_prompt(text_analysis: SiteStructureAnalysis | None) -> str:
+    """Recover from a malformed model response with a smaller JSON-only request."""
+
+    return (
+        "Analyze this UI screenshot for reusable, original interface patterns. "
+        "Your previous response could not be parsed. Return one compact valid JSON object only: "
+        "no Markdown, no explanation, no source branding or copied text. Keep every array to at most "
+        "three short observations.\n\n"
+        "Captured text context:\n"
+        + _text_context(text_analysis)[:1600]
+        + "\n\nRequired JSON shape:\n"
+        + '{"summary":"one sentence","visual_style":["..."],'
+        + '"layout_patterns":["..."],"component_patterns":["..."],'
+        + '"color_direction":["..."],"text_alignment":"aligned|partial|not_available",'
+        + '"text_mismatches":[]}'
+    )
+
+
+def _text_context(text_analysis: SiteStructureAnalysis | None) -> str:
+    """Return only extracted structure as optional local vision context."""
+
+    return (
+        text_analysis.model_dump_json()
+        if text_analysis is not None and text_analysis.status == "extracted"
+        else "No reliable text structure was extracted."
+    )
+
+
 def _parse_model_output(
     source: SourceRecord,
     output_text: str,
@@ -264,7 +310,10 @@ def _parse_model_output(
     if cleaned.startswith("```"):
         cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else ""
         cleaned = cleaned.rsplit("```", 1)[0].strip()
-    payload = json.loads(cleaned)
+    object_start = cleaned.find("{")
+    if object_start < 0:
+        raise ValueError("Vision response did not contain a JSON object.")
+    payload, _ = json.JSONDecoder().raw_decode(cleaned[object_start:])
     if not isinstance(payload, dict):
         raise ValueError("Vision response was not a JSON object.")
     raw_alignment = payload.get("text_alignment")

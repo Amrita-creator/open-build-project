@@ -99,7 +99,8 @@ component, colour, and text-mismatch findings in the
 leave the developer's machine. The default model is `gemma4:e4b`; change it with
 `INSPO_MCP_OLLAMA_VISION_MODEL` if another locally installed vision model is a
 better fit. M5 runs in the background after M3/M4 complete, so a slow local
-vision model cannot exceed the MCP Inspector request timeout. Up to two
+vision model cannot exceed the MCP Inspector request timeout. If a local model
+returns malformed JSON, M5 retries once with a shorter, stricter JSON request. Up to two
 screenshots are submitted concurrently. `create_inspiration_kit` returns a
 `run_id` immediately; call `get_vision_analyses` with that ID until each result
 changes from `pending` to `completed`, `failed`, or `not_configured`. Keep the
